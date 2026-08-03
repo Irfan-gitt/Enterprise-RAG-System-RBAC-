@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
@@ -27,7 +28,8 @@ from rbac import ROLE_PERMISSIONS
 load_dotenv()
 
 APP_DIR = Path(__file__).parent
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "prototype-only-change-this-secret")
+JWT_SECRET_KEY = os.getenv(
+    "JWT_SECRET_KEY", "prototype-only-change-this-secret")
 JWT_ALGORITHM = "HS256"
 TOKEN_EXPIRE_MINUTES = 120
 
@@ -60,12 +62,18 @@ class LoginRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2_000)
+    # Optional client-supplied conversation id. Omit it to start a fresh
+    # thread; the server will generate one and hand it back in the response
+    # so the frontend can resend it on the next turn to keep the same
+    # LangGraph memory thread going.
+    conversation_id: str | None = Field(default=None, max_length=64)
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=10, ge=1, le=25)
 
 
 def create_access_token(email: str, role: str) -> str:
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=TOKEN_EXPIRE_MINUTES)
+    expires_at = datetime.now(timezone.utc) + \
+        timedelta(minutes=TOKEN_EXPIRE_MINUTES)
     return jwt.encode(
         {"sub": email, "role": role, "exp": expires_at},
         JWT_SECRET_KEY,
@@ -84,7 +92,8 @@ def current_user(
     if not credentials or credentials.scheme.lower() != "bearer":
         raise unauthorized
     try:
-        payload = jwt.decode(credentials.credentials, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(credentials.credentials,
+                             JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
         email = payload.get("sub")
         role = payload.get("role")
     except JWTError as error:
@@ -123,7 +132,8 @@ def login(request: LoginRequest) -> dict:
     email = request.email.strip().lower()
     user = DEMO_USERS.get(email)
     if not user or request.password != user["password"]:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password.")
     role = user["role"]
     return {
         "access_token": create_access_token(email, role),
@@ -134,14 +144,25 @@ def login(request: LoginRequest) -> dict:
 
 @app.post("/api/chat")
 def chat(request: ChatRequest, user: Annotated[dict[str, str], Depends(current_user)]) -> dict:
+    conversation_id = request.conversation_id or uuid.uuid4().hex
+    # Namespace the LangGraph thread with the authenticated email so a
+    # guessed or shared conversation_id can never pull up someone else's
+    # chat history — the checkpointer only keys on thread_id.
+    thread_id = f"{user['email']}:{conversation_id}"
     answer = answer_question(
         request.question.strip(),
         user["role"],
+        thread_id=thread_id,
         page=request.page,
         page_size=request.page_size,
     )
     sources, pagination, clean_answer = extract_metadata(answer)
-    return {"answer": clean_answer, "sources": sources, "pagination": pagination}
+    return {
+        "answer": clean_answer,
+        "sources": sources,
+        "pagination": pagination,
+        "conversation_id": conversation_id,
+    }
 
 
 @app.get("/api/health")
