@@ -84,6 +84,19 @@ Streamed response to frontend
 
 ---
 
+## 📊 Monitoring & Observability
+
+All queries are automatically traced using **LangSmith**, giving full visibility into every request:
+
+- 🔍 **Query tracking** — every question logged with the user's role
+- 📄 **Source tracing** — which documents were retrieved for each answer
+- ⏱️ **Response time** — latency tracked per request
+- 🔢 **Token usage** — input/output tokens counted automatically
+- 🛠️ **Tool traces** — which RAG strategy the agent chose (specific/summarize/lookup)
+- ❌ **Error tracking** — failed requests captured with full stack trace
+
+View live traces at [smith.langchain.com](https://smith.langchain.com) under project **CragBot-Enterprise-RAG**.
+
 ## 📁 Project Structure
 
 ```
@@ -134,16 +147,41 @@ Open `http://localhost:8000` in your browser.
 
 ---
 
-## 🔑 Environment Variables
+## 🔑 Demo Credentials
+
+The system uses JWT authentication. Use these demo accounts to test:
+
+| Email | Password | Role |
+|-------|----------|------|
+| employee@company.com | demo123 | Employee |
+| hr@company.com | demo123 | HR |
+| finance@company.com | demo123 | Finance |
+| engineering@company.com | demo123 | Engineering |
+| marketing@company.com | demo123 | Marketing |
+| admin@company.com | demo123 | Admin |
+
+> ⚠️ These are demo accounts only. In production, replace with a proper database and identity provider.
+
+---
+
+## 🔐 Environment Variables
+
+Copy `.env.example` to `.env` and fill in your keys:
+
+```bash
+cp .env.example .env
+```
 
 ```
-GROQ_API_KEY=
-JINA_API_KEY=
-SERPER_API_KEY=
-LANGSMITH_API_KEY=
-JWT_SECRET_KEY=
+GROQ_API_KEY=          # from console.groq.com
+JINA_API_KEY=          # from jina.ai
+SERPER_API_KEY=        # from serper.dev
+LANGSMITH_API_KEY=     # from smith.langchain.com
+JWT_SECRET_KEY=        # any random secret string
+LANGCHAIN_TRACING_V2=true    # enables tracing
+LANGCHAIN_API_KEY=            # from smith.langchain.com
+LANGCHAIN_PROJECT=            # your project name in LangSmith
 ```
-
 ---
 
 ## 💡 RAG Strategy

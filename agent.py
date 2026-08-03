@@ -1,3 +1,4 @@
+from langsmith import traceable
 from typing import Annotated, TypedDict
 import re
 
@@ -126,6 +127,10 @@ _graph_builder.add_edge("generate", END)
 graph = _graph_builder.compile(checkpointer=memory)
 
 
+@traceable(
+    name="CragBot Query",
+    tags=["enterprise-rag"],
+)
 def answer_question(
     question: str,
     role: str,
