@@ -5,7 +5,7 @@ An enterprise-grade internal knowledge assistant built for companies to query th
 ---
 
 ## 🔗 Live Demo
-> Deploy link here after Railway deployment
+> https://enterprise-rag-system-rbac-production.up.railway.app/
 
 ---
 
