@@ -12,7 +12,6 @@ from langchain_community.embeddings import JinaEmbeddings
 from langchain_core.documents import Document
 from langchain_core.tools import tool
 
-from rbac import ROLE_PERMISSIONS
 
 load_dotenv()
 EMBEDDING = JinaEmbeddings(model_name="jina-embeddings-v3")
@@ -25,13 +24,13 @@ client = TypeSafeClient(
     base_url="https://openrouter.ai/api",
 )
 
-
+user_query = "find the employee id of the person who joined in 2020 and has a salary greater than 100000"
 response = client.system_one(
     model="typesafe/jev-1.13",
     state={"question": "find the employee id of the person who joined in 2020 and has a salary greater than 100000"},
     questions={
         "category": Choice(
-            instructions="find me the anual salary of the employee who joined in 2020 and has a salary greater than 100000",
+            instructions=user_query,
             criteria={
                 "lookup_search": "Exact employee ID, email, or phone lookup",
                 "list_search": "Requests for 'all' of something — every employee, every record of a type",

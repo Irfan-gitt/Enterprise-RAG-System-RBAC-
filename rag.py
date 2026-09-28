@@ -74,6 +74,7 @@ def _stores(departments: Iterable[str]) -> list[Chroma]:
     return [
         Chroma(persist_directory=str(path), embedding_function=EMBEDDING,
                collection_name=f"dept_{department}")
+
         for department in departments
         if (path := DB_DIR / department).exists()
     ]
