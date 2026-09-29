@@ -12,6 +12,10 @@ from langchain_community.embeddings import JinaEmbeddings
 from langchain_core.documents import Document
 from langchain_core.tools import tool
 
+from retrieval_methods.hybrid_retrieval import hybrid_search
+from retrieval_methods.specific_search_BM25 import bm25_search
+from retrieval_methods.multi_query_rtrvl import expanded_hybrid_search
+
 
 load_dotenv()
 EMBEDDING = JinaEmbeddings(model_name="jina-embeddings-v3")
