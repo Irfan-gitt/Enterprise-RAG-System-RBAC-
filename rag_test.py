@@ -78,11 +78,11 @@ def retrieval_category(question):
 
 
 def retriver(question: str, role: str):
-    category = retrieval_category(question, k=TOP_K)
-    for department in ROLE_PERMISSIONS.get(role, department, {"general"}):
+    category = retrieval_category(question)
+    for department in ROLE_PERMISSIONS.get(role, {"general"}):
         if category == "lookup_search":
             print("lookup_search")
-            return bm25_search(question, k=TOP_K)
+            return bm25_search(question, department)
         elif category == "specific_search":
             print("lookup_search")
             return hybrid_search(question, department, k=TOP_K)
@@ -92,7 +92,7 @@ def retriver(question: str, role: str):
             return "Failed to find category"
 
 
-def rag_agent(question, system_answer):
+def rag_agent(question: str, system_answer: str):
     prompt = f"""
     #ROLE
     You are a Finalising agent for a Agentic Rag System 
@@ -112,4 +112,12 @@ def rag_agent(question, system_answer):
 
 
 def main():
-    pass
+    while True:
+        user_input = input("You: ")
+        role = "hr"
+        system_answer = retriver(user_input, role)
+        ss = rag_agent(user_input, system_answer)
+        print(ss)
+
+
+print(main())
