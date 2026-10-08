@@ -12,10 +12,20 @@ extra local model, no extra dependency.
 
 Requires: pip install rank_bm25 requests
 Needs JINA_API_KEY set in your environment / .env for rerank().
+
+FIXES in this version:
+    1. hybrid_search() always returns a list. Before, it returned None
+       when use_reranker=False (no return statement on that path).
+    2. _doc_key() hashes the FULL chunk text. Before, it used the first
+       80 chars, which are identical for every chunk of the same section
+       (the "file > h1 > h2 > h3" prefix), so RRF merged them into one.
+    3. rerank() prints why it failed instead of failing silently, so you
+       can see when a run was not reranked.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from pathlib import Path
@@ -33,8 +43,9 @@ DB_DIR = Path("chroma_db")
 JINA_API_KEY = os.environ.get("JINA_API_KEY")
 JINA_RERANK_URL = "https://api.jina.ai/v1/rerank"
 
-DEPARTMENT = "financial"                  # <- change this to switch department
-QUERY = "renewal pricing policy"   # <- change this to test a different query
+DEPARTMENT = "engineering"                  # <- change this to switch department
+# <- change this to test a different query
+QUERY = "Details about Company Overview"
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
@@ -89,8 +100,12 @@ def bm25_search(query: str, department: str, k: int = 10) -> list[Document]:
 # --------------------------------------------------------------------------
 
 def _doc_key(doc: Document) -> str:
-    """Identity for dedup/scoring: filename + section beats hashing full text."""
-    return f"{doc.metadata.get('filename', '')}|{doc.metadata.get('section', '')}|{doc.page_content[:80]}"
+    """Identity of a chunk = hash of its full text.
+
+    (The old key used only the first 80 characters, which are the same for
+    every chunk of one section because of the "file > h1 > h2 > h3" prefix.)
+    """
+    return hashlib.md5(doc.page_content.encode("utf-8")).hexdigest()
 
 
 def reciprocal_rank_fusion(
@@ -125,9 +140,12 @@ def rerank(query: str, documents: list[Document], top_k: int = 5) -> list[Docume
     """Re-score merged candidates jointly with the query via Jina's rerank
     API. Falls back to returning documents unchanged (just truncated) if
     the API key is missing or the call fails, so this step is optional
-    and never crashes the pipeline.
+    and never crashes the pipeline. Every fallback prints the reason.
     """
-    if not JINA_API_KEY or not documents:
+    if not documents:
+        return []
+    if not JINA_API_KEY:
+        print("[rerank] JINA_API_KEY missing, skipping rerank.")
         return documents[:top_k]
 
     try:
@@ -143,14 +161,15 @@ def rerank(query: str, documents: list[Document], top_k: int = 5) -> list[Docume
                 "documents": [doc.page_content for doc in documents],
                 "top_n": top_k,
             },
-            timeout=10,
+            timeout=20,
         )
         response.raise_for_status()
         results = response.json()["results"]
         return [documents[r["index"]] for r in results]
-    except Exception:
+    except Exception as exc:
         # Network error, bad response shape, rate limit, etc. — skip
-        # reranking rather than break the whole search.
+        # reranking rather than break the whole search, but say so.
+        print(f"[rerank] failed, using un-reranked order: {exc}")
         return documents[:top_k]
 
 
@@ -159,7 +178,10 @@ def rerank(query: str, documents: list[Document], top_k: int = 5) -> list[Docume
 # --------------------------------------------------------------------------
 
 def hybrid_search(query: str, department: str, k: int = 5, use_reranker: bool = False) -> list[Document]:
-    """Vector + BM25 -> RRF merge -> (optional) rerank -> top-k."""
+    """Vector + BM25 -> RRF merge -> (optional) rerank -> top-k.
+
+    Always returns a list (empty if nothing was found), never None.
+    """
     vector_results = vector_search(query, department, k=10)
     bm25_results = bm25_search(query, department, k=10)
     merged = reciprocal_rank_fusion([vector_results, bm25_results])
@@ -170,10 +192,14 @@ def hybrid_search(query: str, department: str, k: int = 5, use_reranker: bool = 
 
 
 if __name__ == "__main__":
-    results = hybrid_search(QUERY, DEPARTMENT, k=5, use_reranker=False)
-    if not results:
-        print("No results.")
-    for i, doc in enumerate(results, 1):
-        filename = doc.metadata.get("filename", "unknown")
-        print(f"\n[{i}] {filename}")
-        print(doc.page_content[:300])
+    for flag in (False, True):
+        print("\n" + "=" * 50)
+        print(f"use_reranker={flag}")
+        print("=" * 50)
+        results = hybrid_search(QUERY, DEPARTMENT, k=5, use_reranker=True)
+        if not results:
+            print("No results.")
+        for i, doc in enumerate(results, 1):
+            filename = doc.metadata.get("filename", "unknown")
+            print(f"\n[{i}] {filename}")
+            print(doc.page_content)
