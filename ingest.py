@@ -32,8 +32,8 @@ RESOURCE_DIR = Path("resources")
 DB_DIR = Path("chroma_db")
 DEPARTMENTS = ("engineering", "financial", "general", "hr", "marketing")
 
-CHUNK_SIZE = 512
-CHUNK_OVERLAP = 64          # set to 0 if you also use section_expand.py
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 200          # set to 0 if you also use section_expand.py
 MIN_CHUNK_CHARS = 30
 BATCH_SIZE = 64
 HEADER_RESERVE = 40         # HEADINGS: tokens kept free for the prefix line
