@@ -12,9 +12,9 @@ load_dotenv()
 EMBEDDING = JinaEmbeddings(model_name="jina-embeddings-v3")
 DB_DIR = Path("chroma_db")
 
-DEPARTMENT = "hr"                  # <- change this to switch department
+DEPARTMENT = "engineering"                  # <- change this to switch department
 # <- change this to test a different query
-QUERY = "find the employee with this id FINEMP1042"
+QUERY = "Details about Company Overview"
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
@@ -54,4 +54,4 @@ if __name__ == "__main__":
     for r in results:
         filename = r["metadata"].get("filename", "unknown")
         print(f"\n[score {r['score']:.2f}] {filename}")
-        print(r["content"][:300])
+        print(r["content"])
