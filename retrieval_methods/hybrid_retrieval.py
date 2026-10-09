@@ -201,5 +201,5 @@ if __name__ == "__main__":
             print("No results.")
         for i, doc in enumerate(results, 1):
             filename = doc.metadata.get("filename", "unknown")
-            print(f"\n[{i}] {filename}")
+            print(f"\n[{i}] {filename}")        
             print(doc.page_content)
