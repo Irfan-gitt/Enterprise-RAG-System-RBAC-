@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from rbac import ROLE_PERMISSIONS
 import os
 from typesafe_sdk import Choice, TypeSafeClient
@@ -16,6 +17,7 @@ from langchain_core.tools import tool
 from retrieval_methods.hybrid_retrieval import hybrid_search
 from retrieval_methods.specific_search_BM25 import bm25_search
 from retrieval_methods.multi_query_rtrvl import expanded_hybrid_search
+from retrieval_methods.hybrid_retrieval import reciprocal_rank_fusion, rerank
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 
@@ -44,52 +46,97 @@ def retrieval_category(question):
         state={"question": question},
         questions={
             "category": Choice(
-                instructions="Which retrieval method fits this question best?",
+                instructions=(
+                    "Pick exactly one category. Decide in this order:\n"
+                    "1. If the question is about ONE named person's own record "
+                    "(employee ID, email, phone, full name) -> lookup_search.\n"
+                    "2. Else, if the question already uses the key words a company "
+                    "document would use for the topic (a policy name, system name, "
+                    "metric or term) and wants one fact from it -> specific_search.\n"
+                    "3. Else, if the question describes a situation, problem or goal in "
+                    "everyday words without naming the policy or system, or needs "
+                    "several sections combined -> summarize_search.\n"
+                    "If you are unsure between specific_search and summarize_search, "
+                    "choose summarize_search."
+                ),
                 criteria={
                     "lookup_search": (
-                        "The question names a specific person and asks for their own record — "
-                        "matched by employee ID, email, phone number, or full name. Not about "
-                        "a policy, report, or company-wide fact. Examples: 'what is FINEMP1042's "
-                        "salary', 'find isha.chowdhury@fintechco.com', 'who is Vihaan Desai'."
+                        "The question is about ONE named person's own record or contact "
+                        "details, identified by employee ID, email, phone number or full "
+                        "name, and asks a fact about that individual (salary, team, "
+                        "manager, joining date). It is NOT about a policy, process, "
+                        "system or company-wide fact. "
+                        "Examples: 'what is FINEMP1042's salary', "
+                        "'find isha.chowdhury@fintechco.com', 'who is Vihaan Desai', "
+                        "'what is Vihaan Desai's department'. "
+                        "NOT this: 'what is the leave policy' (no person), "
+                        "'why was my leave rejected' (no named person)."
                     ),
                     "specific_search": (
-                        "The question can be answered with ONE fact, number, date, or policy "
-                        "detail — a single lookup, not a synthesis. No person's identity involved. "
+                        "A DIRECT question that already uses the same key words the "
+                        "document would use (policy name, system name, metric, term) and "
+                        "wants one fact, number, date, list or definition. The answer "
+                        "sits in one section. "
                         "Examples: 'what is the leave policy', 'what was Q1 2024 revenue', "
-                        "'when is the reimbursement deadline'.,'how was the previous year company turn over'"
+                        "'when is the reimbursement deadline', 'what was last year's "
+                        "company turnover', 'what are the RTO and RPO for disaster "
+                        "recovery', 'which databases does FinSolve use', 'what is the "
+                        "minimum unit test coverage'. "
+                        "NOT this: a question that describes a situation or symptom "
+                        "instead of naming the topic."
                     ),
                     "summarize_search": (
-                        "An indirect or personal question about the user's own situation — often "
-                        "'why' something happened, was delayed, or was rejected — where the "
-                        "wording won't match how the policy document itself is phrased. "
-                        "Examples: 'why is my leave request getting rejected', 'why haven't I "
-                        "got my travel money back yet', 'why was my reimbursement denied'."
+                        "An INDIRECT question: it describes a situation, problem, symptom "
+                        "or goal in everyday words and does NOT name the policy, process "
+                        "or system that answers it, so its words will not match the "
+                        "document. Often starts with why / how come / who checks / what "
+                        "happens if / how do we stop. Also use it for broad questions "
+                        "that need several sections combined (summarize, explain end to "
+                        "end, compare). Works for any department. "
+                        "Examples: 'why is my leave request getting rejected', 'why "
+                        "haven't I got my travel money back yet', 'our cloud bill keeps "
+                        "going up, who checks it', 'a test fails randomly then passes, "
+                        "what does the pipeline do', 'how do we stop old wrong data from "
+                        "being shown after a change', 'a customer is worried their card "
+                        "details could be stolen, what protects them', 'summarize our "
+                        "security measures'. "
+                        "Contrast: 'what is the cache invalidation policy' is "
+                        "specific_search, but 'how do we stop old wrong data being shown "
+                        "after a change' is summarize_search."
                     ),
                 },
             )
         },
     )
 
-    confidence = response.answers["category"].confidence
-
-    category = response.answers["category"].choice
-
-    return category
+    return response.answers["category"].choice
 
 
-def retriver(question: str, role: str):
+def retriver(question: str, role: str) -> list:
+    # Unknown role -> least privilege. sorted() makes the order the same every run.
+    departments = sorted(ROLE_PERMISSIONS.get(role, {"general"}))
     category = retrieval_category(question)
-    for department in ROLE_PERMISSIONS.get(role, {"general"}):
-        if category == "lookup_search":
-            print("lookup_search")
-            return bm25_search(question, department)
-        elif category == "specific_search":
-            print("lookup_search")
-            return hybrid_search(question, department, k=TOP_K)
-        elif category == "summarize_search":
-            return expanded_hybrid_search(question, department, k=TOP_K)
-        else:
-            return "Failed to find category"
+
+    if category == "lookup_search":
+        results = []
+        print("lookup_search")
+        for dept in departments:
+            results.extend(bm25_search(question, dept))
+        return sorted(results, key=lambda r: r["score"], reverse=True)[:TOP_K]
+
+    if category == "summarize_search":
+        print("summarize_search")
+        def search(dept): return expanded_hybrid_search(
+            question, dept, k=TOP_K)
+    else:   # specific_search or anything else
+        print("specific_search")
+        def search(dept): return hybrid_search(question, dept, k=TOP_K)
+
+    candidates = reciprocal_rank_fusion([search(dept) for dept in departments])
+    if len(departments) > 1:
+        # best chunks across departments
+        return rerank(question, candidates, top_k=TOP_K)
+    return candidates[:TOP_K]
 
 
 def rag_agent(question: str, system_answer: str):
@@ -114,10 +161,11 @@ def rag_agent(question: str, system_answer: str):
 def main():
     while True:
         user_input = input("You: ")
-        role = "hr"
+        role = "admin"
         system_answer = retriver(user_input, role)
         ss = rag_agent(user_input, system_answer)
         print(ss)
 
 
-print(main())
+if __name__ == "__main__":
+    main()
