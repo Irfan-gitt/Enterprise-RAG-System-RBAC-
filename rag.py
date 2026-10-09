@@ -1,9 +1,10 @@
-"""Role-scoped retrieval tools used by the agent.
-
-Department selection is code-controlled, not an LLM tool argument.
-"""
+"""THIS is an example of a RAG system with an agentic finalizing agent that checks the RAG output and ensures it meets the user's needs. The system uses a hybrid retrieval method to fetch relevant documents based on the user's question and role, and then the finalizing agent verifies the output before presenting it to the user."""
 
 from __future__ import annotations
+
+from rbac import ROLE_PERMISSIONS
+import os
+from typesafe_sdk import Choice, TypeSafeClient
 
 from pathlib import Path
 from typing import Iterable
@@ -15,165 +16,157 @@ from langchain_community.embeddings import JinaEmbeddings
 from langchain_core.documents import Document
 from langchain_core.tools import tool
 
-from rbac import ROLE_PERMISSIONS
+from retrieval_methods.hybrid_retrieval import hybrid_search
+from retrieval_methods.specific_search_BM25 import bm25_search
+from retrieval_methods.multi_query_rtrvl import expanded_hybrid_search
+from retrieval_methods.hybrid_retrieval import reciprocal_rank_fusion, rerank
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_groq import ChatGroq
 
 load_dotenv()
 EMBEDDING = JinaEmbeddings(model_name="jina-embeddings-v3")
 DB_DIR = Path("chroma_db")
-EMPLOYEE_ID_PATTERN = re.compile(r"\b(?:[A-Za-z]+)?EMP[-_]?\d+\b", re.IGNORECASE)
+
+OPENROUTER_API_KEY = os.getenv(
+    "OPENROUTER_API_KEY")
 
 
-def _employee_id_candidates(text: str) -> set[str]:
-    """Return normalized IDs, accepting both EMP1002 and FINEMP1002."""
-    return {
-        re.sub(r"[^A-Z0-9]", "", match.group(0).upper())
-        for match in EMPLOYEE_ID_PATTERN.finditer(text)
-    }
+llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0)
 
 
-DEPARTMENT_HINTS = {
-    "financial": {
-        "finance", "financial", "revenue", "profit", "income", "budget",
-        "expense", "expenses", "invoice", "vendor", "cash flow", "q1", "q2", "q3", "q4",
-    },
-    "hr": {
-        "employee", "employees", "payroll", "salary", "leave", "hiring",
-        "attendance", "performance review", "employee id",
-    },
-    "engineering": {
-        "engineering", "architecture", "technical", "system design", "api",
-        "infrastructure", "deployment", "database",
-    },
-    "marketing": {
-        "marketing", "campaign", "brand", "advertising", "social media", "seo",
-    },
-}
-LIST_STOP_WORDS = {
-    "get", "give", "show", "list", "all", "the", "a", "an", "me", "of",
-    "details", "detail", "information", "records", "record", "please", "with",
-}
-LIST_FIELD_ALIASES = {
-    "dob": "date_of_birth",
-    "birth": "date_of_birth",
-    "joining": "date_of_joining",
-    "joined": "date_of_joining",
-    "salary": "salary",
-}
+TOP_K = 10
+
+client = TypeSafeClient(
+    api_key=OPENROUTER_API_KEY,
+    base_url="https://openrouter.ai/api",
+)
 
 
-def _search_departments(query: str, allowed_departments: tuple[str, ...]) -> tuple[str, ...]:
-    """Prioritize the authorized department most clearly named by the query."""
-    query_lower = query.lower()
-    for department, hints in DEPARTMENT_HINTS.items():
-        if department in allowed_departments and any(hint in query_lower for hint in hints):
-            return (department,)
-    return allowed_departments
-
-
-def _stores(departments: Iterable[str]) -> list[Chroma]:
-    return [
-        Chroma(persist_directory=str(path), embedding_function=EMBEDDING,
-               collection_name=f"dept_{department}")
-
-        for department in departments
-        if (path := DB_DIR / department).exists()
-    ]
-
-
-def _format(documents: list[Document]) -> str:
-    if not documents:
-        return "No relevant company documents were found."
-    return "\n\n".join(
-        f"[Source: {doc.metadata.get('filename', 'unknown')}"
-        f" | Section: {doc.metadata.get('section', 'not specified')}]\n"
-        f"{doc.page_content}"
-        for doc in documents
+def retrieval_category(question):
+    response = client.system_one(
+        model="typesafe/jev-1.13",
+        state={"question": question},
+        questions={
+            "category": Choice(
+                instructions=(
+                    "Pick exactly one category. Decide in this order:\n"
+                    "1. If the question is about ONE named person's own record "
+                    "(employee ID, email, phone, full name) -> lookup_search.\n"
+                    "2. Else, if the question already uses the key words a company "
+                    "document would use for the topic (a policy name, system name, "
+                    "metric or term) and wants one fact from it -> specific_search.\n"
+                    "3. Else, if the question describes a situation, problem or goal in "
+                    "everyday words without naming the policy or system, or needs "
+                    "several sections combined -> summarize_search.\n"
+                    "If you are unsure between specific_search and summarize_search, "
+                    "choose summarize_search."
+                ),
+                criteria={
+                    "lookup_search": (
+                        "The question is about ONE named person's own record or contact "
+                        "details, identified by employee ID, email, phone number or full "
+                        "name, and asks a fact about that individual (salary, team, "
+                        "manager, joining date). It is NOT about a policy, process, "
+                        "system or company-wide fact. "
+                        "Examples: 'what is FINEMP1042's salary', "
+                        "'find isha.chowdhury@fintechco.com', 'who is Vihaan Desai', "
+                        "'what is Vihaan Desai's department'. "
+                        "NOT this: 'what is the leave policy' (no person), "
+                        "'why was my leave rejected' (no named person)."
+                    ),
+                    "specific_search": (
+                        "A DIRECT question that already uses the same key words the "
+                        "document would use (policy name, system name, metric, term) and "
+                        "wants one fact, number, date, list or definition. The answer "
+                        "sits in one section. "
+                        "Examples: 'what is the leave policy', 'what was Q1 2024 revenue', "
+                        "'when is the reimbursement deadline', 'what was last year's "
+                        "company turnover', 'what are the RTO and RPO for disaster "
+                        "recovery', 'which databases does FinSolve use', 'what is the "
+                        "minimum unit test coverage'. "
+                        "NOT this: a question that describes a situation or symptom "
+                        "instead of naming the topic."
+                    ),
+                    "summarize_search": (
+                        "An INDIRECT question: it describes a situation, problem, symptom "
+                        "or goal in everyday words and does NOT name the policy, process "
+                        "or system that answers it, so its words will not match the "
+                        "document. Often starts with why / how come / who checks / what "
+                        "happens if / how do we stop. Also use it for broad questions "
+                        "that need several sections combined (summarize, explain end to "
+                        "end, compare). Works for any department. "
+                        "Examples: 'why is my leave request getting rejected', 'why "
+                        "haven't I got my travel money back yet', 'our cloud bill keeps "
+                        "going up, who checks it', 'a test fails randomly then passes, "
+                        "what does the pipeline do', 'how do we stop old wrong data from "
+                        "being shown after a change', 'a customer is worried their card "
+                        "details could be stolen, what protects them', 'summarize our "
+                        "security measures'. "
+                        "Contrast: 'what is the cache invalidation policy' is "
+                        "specific_search, but 'how do we stop old wrong data being shown "
+                        "after a change' is summarize_search."
+                    ),
+                },
+            )
+        },
     )
 
+    return response.answers["category"].choice
 
-def create_retrieval_tools(role: str):
-    """Return tools whose search scope is permanently bound to *role*."""
-    allowed_departments = tuple(ROLE_PERMISSIONS.get(role, {"general"}))
 
-    def search(query: str, k: int) -> list[Document]:
-        ranked: list[tuple[Document, float]] = []
-        for store in _stores(_search_departments(query, allowed_departments)):
-            ranked.extend(store.similarity_search_with_relevance_scores(query, k=k))
-        ranked.sort(key=lambda result: result[1], reverse=True)
-        return [document for document, _score in ranked[:k]]
+def retriver(question: str, role: str) -> list:
 
-    @tool
-    def specific_search(query: str) -> str:
-        """Search permitted company documents for focused facts, policies, people, or numbers."""
-        return _format(search(query, k=5))
+    departments = sorted(ROLE_PERMISSIONS.get(role, {"general"}))
+    category = retrieval_category(question)
 
-    @tool
-    def summarize_search(query: str) -> str:
-        """Retrieve permitted document sections needed to summarize a report or topic."""
-        return _format(search(query, k=12))
+    if category == "lookup_search":
+        results = []
+        print("lookup_search")
+        for dept in departments:
+            results.extend(bm25_search(question, dept))
+        return sorted(results, key=lambda r: r["score"], reverse=True)[:TOP_K]
 
-    @tool
-    def lookup_search(query: str) -> str:
-        """Find permitted company records using an exact employee ID, email, phone, or code."""
-        requested_ids = _employee_id_candidates(query)
-        query_lower = query.lower().strip()
-        exact_matches: list[Document] = []
-        for store in _stores(allowed_departments):
-            data = store.get(include=["documents", "metadatas"])
-            for content, metadata in zip(data["documents"], data["metadatas"]):
-                record_ids = _employee_id_candidates(content)
-                id_match = any(
-                    requested == record or record.endswith(requested)
-                    for requested in requested_ids
-                    for record in record_ids
-                )
-                # For an employee-ID question, never fall back to a loose
-                # document match: it could return the wrong employee record.
-                text_match = not requested_ids and query_lower in content.lower()
-                if id_match or text_match:
-                    exact_matches.append(Document(page_content=content, metadata=metadata))
-        if exact_matches:
-            return _format(exact_matches[:5])
-        if requested_ids:
-            return "No relevant company documents were found."
-        return _format(search(query, k=5))
+    if category == "summarize_search":
+        print("summarize_search")
+        def search(dept): return expanded_hybrid_search(
+            question, dept, k=TOP_K)
+    else:   # specific_search or anything else
+        print("specific_search")
+        def search(dept): return hybrid_search(question, dept, k=TOP_K)
 
-    @tool
-    def list_search(query: str, page: int = 1, page_size: int = 10) -> str:
-        """List every permitted record matching a role, department, or exact attribute.
+    candidates = reciprocal_rank_fusion([search(dept) for dept in departments])
+    if len(departments) > 1:
+        # best chunks across departments
+        return rerank(question, candidates, top_k=TOP_K)
+    return candidates[:TOP_K]
 
-        Use for requests containing 'all', such as 'all Relationship Managers'.
-        Results are paginated so large employee lists are never silently truncated.
-        """
-        terms = [
-            LIST_FIELD_ALIASES.get(term, term.rstrip("s"))
-            for term in re.findall(r"[a-z0-9]+", query.lower())
-            if len(term) > 2 and term not in LIST_STOP_WORDS
-        ]
-        if not terms:
-            return "No relevant company documents were found."
 
-        matches: list[Document] = []
-        for store in _stores(_search_departments(query, allowed_departments)):
-            data = store.get(include=["documents", "metadatas"])
-            for content, metadata in zip(data["documents"], data["metadatas"]):
-                normalized_content = content.lower()
-                if all(term in normalized_content for term in terms):
-                    matches.append(Document(page_content=content, metadata=metadata))
+def rag_agent(question: str, system_answer: str):
+    prompt = f"""
+    #ROLE
+    You are a Finalising agent for a Agentic Rag System 
 
-        matches.sort(key=lambda doc: doc.page_content)
-        if not matches:
-            return "No relevant company documents were found."
+    #TASK
+    Your job is to check is wheather the Rag_output: {system_answer} Fullfill Users Question: {question}
 
-        safe_page_size = max(1, min(page_size, 25))
-        total_pages = (len(matches) + safe_page_size - 1) // safe_page_size
-        safe_page = max(1, min(page, total_pages))
-        start = (safe_page - 1) * safe_page_size
-        page_matches = matches[start:start + safe_page_size]
-        header = (
-            f"[List results: {len(matches)} total matches; page {safe_page} of "
-            f"{total_pages}; showing {len(page_matches)} records.]\n\n"
-        )
-        return header + _format(page_matches)
+    #CONSTRAIN 
+    Dont make up any point just make the answer as user need 
 
-    return [specific_search, summarize_search, lookup_search, list_search]
+    #EXAMPLE
+    Suppose user only need a information about a specific person named 'ayush josh' but the rag give 3-4 names similar too eg: ayush khan, ayush hedje, vishak ayush etc.. , So your job is to give the correct name ,only in this senario so you only give ayush josh's information to user , like  this example act in every where according to the situation as users request
+
+    """
+    response = llm.invoke(prompt).content
+    return response
+
+
+def agentic_rag_agent(user_input, role):
+
+    system_answer = retriver(user_input, role)
+    final = rag_agent(user_input, system_answer)
+
+    return final
+
+
+if __name__ == "__main__":
+    print(agentic_rag_agent("who is FINEMP1026", "hr"))
