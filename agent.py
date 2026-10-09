@@ -1,69 +1,94 @@
+import logging
 import os
 import re
-from typing import Any
+from typing import Annotated, TypedDict
 
 from dotenv import load_dotenv
-from groq import BadRequestError
-from langchain.agents import create_agent
-from langchain.agents.middleware import AgentMiddleware, AgentState, hook_config
-from langchain_core.messages import AIMessage
-from langchain_core.tools import tool
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_groq import ChatGroq
-from langgraph.runtime import Runtime
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
 
-# !! Copy this exact import line from the file where retrieval_category works.
-# I don't know the module path of your TypeSafe SDK, so I can't write it for you.
+from rag import agentic_rag_agent
 from typesafe_sdk import Choice, TypeSafeClient
 
 load_dotenv()  # loads GROQ_API_KEY and OPENROUTER_API_KEY from .env
 
-# Main agent model (unchanged)
-llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0)
+logger = logging.getLogger(__name__)
 
-# Guard model client (Jev), same setup as your retrieval_category
-client = TypeSafeClient(
-    api_key=os.getenv("OPENROUTER_API_KEY"),
-    base_url="https://openrouter.ai/api",
-)
-
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 REFUSAL = (
     "I can only help with company-related questions for your role. "
     "Please ask something related to your work."
 )
+ERROR_REPLY = "Sorry, something went wrong while processing your request. Please try again."
 
-# EDIT THIS: the more specific it is, the more accurate the guard becomes
 COMPANY_DESCRIPTION = (
     "An internal assistant for our company's employees. It answers questions "
     "about HR policies, benefits, leave, departments, employees and their roles, "
     "projects, onboarding, and internal processes, based on company documents."
 )
 
+BANNED_KEYWORDS = [
+    "hack", "exploit", "malware", "jailbreak", "prompt injection",
+    "bypass", "circumvent", "cheat", "crack", "pirate", "torrent",
+]
+_KEYWORD_PATTERN = re.compile(
+    r"\b(?:" + "|".join(re.escape(k.lower())
+                        for k in BANNED_KEYWORDS) + r")(?:s|es|ing|ed|er)?\b"
+)
 
-# ---------------- Layer 1: keyword filter (unchanged) ----------------
-class ContentFilterMiddleware(AgentMiddleware):
-    """Deterministic guardrail: blocks banned requests before any LLM call."""
+HISTORY_MESSAGES = 4  # how many earlier messages the guard / rewrite steps can see
 
-    def __init__(self, banned_keywords: list[str]):
-        super().__init__()
-        alts = "|".join(re.escape(k.lower()) for k in banned_keywords)
-        self.pattern = re.compile(rf"\b(?:{alts})(?:s|es|ing|ed|er)?\b")
+# Jev client (guard)
+client = TypeSafeClient(
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+    base_url="https://openrouter.ai/api",
+)
 
-    @hook_config(can_jump_to=["end"])
-    def before_agent(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
-        last_human = next(
-            (m for m in reversed(state["messages"]) if m.type == "human"), None
-        )
-        if last_human is None or not isinstance(last_human.content, str):
-            return None
+# Small model used only to turn follow-ups into standalone questions
+rewrite_llm = ChatGroq(
+    model="openai/gpt-oss-20b",
+    temperature=0,
+    max_tokens=512,
+    timeout=10,
+    max_retries=1,
+    reasoning_effort="low",
+)
 
-        match = self.pattern.search(last_human.content.lower())
-        if match:
-            print(f"Blocked -- keyword detected: '{match.group(0)}'")
-            return {"messages": [AIMessage(REFUSAL)], "jump_to": "end"}
-        return None
+REWRITE_PROMPT = """Rewrite the user's latest question as one standalone question.
+Use the conversation ONLY to resolve references such as "he", "she", "that policy", "his manager".
+
+Rules:
+- Do not answer the question.
+- Do not add any information that is not in the conversation.
+- If the question is already standalone, return it unchanged.
+- Output only the rewritten question, nothing else.
+
+Conversation:
+{history}
+
+Latest question: {question}
+
+Standalone question:"""
 
 
-# ---------------- Layer 2: Jev topic guard (replaces the Groq guard) ----------------
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def build_history(messages: list[BaseMessage], max_chars: int = 300) -> str:
+    """Last few human/ai messages as plain text, each trimmed to save tokens."""
+    past = [
+        f"{m.type}: {m.content[:max_chars]}"
+        for m in messages
+        if m.type in ("human", "ai") and isinstance(m.content, str) and m.content
+    ]
+    return "\n".join(past[-HISTORY_MESSAGES:])
+
+
 def topic_check(question: str, history: str = "") -> str:
     """Returns 'company', 'off_topic' or 'unclear'."""
     response = client.system_one(
@@ -111,88 +136,132 @@ def topic_check(question: str, history: str = "") -> str:
     return response.answers["topic"].choice
 
 
-class LLMTopicGuardMiddleware(AgentMiddleware):
-    """Blocks general-knowledge / coding / chit-chat. Fails open on any error."""
+def check_query(query: str, history: str = "") -> tuple[bool, str]:
+    """Runs keyword filter then Jev topic check. Returns (allowed, reason)."""
+    match = _KEYWORD_PATTERN.search(query.lower())
+    if match:
+        return False, f"keyword:{match.group(0)}"
 
-    @hook_config(can_jump_to=["end"])
-    def before_agent(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
-        msgs = state["messages"]
-        last_human = next(
-            (m for m in reversed(msgs) if m.type == "human"), None)
-        if last_human is None or not isinstance(last_human.content, str):
-            return None
+    try:
+        label = topic_check(query, history)
+    except Exception as e:
+        logger.warning("Jev guard failed, letting request through: %s", e)
+        return True, "guard_error_fail_open"  # never block a real question on an error
 
-        # last 4 earlier messages, each trimmed to save tokens
-        past = [
-            f"{m.type}: {m.content[:300]}"
-            for m in msgs[:-1]
-            if m.type in ("human", "ai") and isinstance(m.content, str) and m.content
-        ]
-        history = "\n".join(past[-4:])
-
-        try:
-            label = topic_check(last_human.content, history)
-        except Exception as e:
-            print(f"Jev guard failed, letting request through: {e}")
-            return None  # fail open: never block a real question because of an error
-
-        print(f"Guard label: {label}")
-        if label == "off_topic":
-            print(
-                f"Blocked -- Jev guard: off_topic -> {last_human.content[:60]}")
-            return {"messages": [AIMessage(REFUSAL)], "jump_to": "end"}
-        return None
+    if label == "off_topic":
+        return False, "jev:off_topic"
+    return True, f"jev:{label}"
 
 
-@tool
-def search_tool(query: str) -> str:
-    """Search for information."""
-    return f"Results for: {query}"
+# ---------------------------------------------------------------------------
+# Graph
+# ---------------------------------------------------------------------------
+class GraphState(TypedDict, total=False):
+    messages: Annotated[list[BaseMessage], add_messages]
+    # set by the caller on every request (never by the model)
+    role: str
+    blocked: bool
+    standalone_question: str
 
 
-filtered_agent = create_agent(
-    model=llm,
-    tools=[search_tool],
-    system_prompt=(
-        "You are an internal company assistant. The ONLY tool you have is "
-        "`search_tool`. Never call any other tool (such as open_file, browser, "
-        "or python). Answer using search_tool results only. If the results "
-        "don't contain the answer, say you couldn't find it."
-    ),
-    middleware=[
-        ContentFilterMiddleware(
-            banned_keywords=[
+def guard_node(state: GraphState) -> dict:
+    messages = state["messages"]
+    query = messages[-1].content
+    allowed, reason = check_query(query, build_history(messages[:-1]))
 
-                "hack", "exploit", "malware", "jailbreak", "prompt injection", "bypass", "circumvent", "cheat", "crack", "pirate", "torrent",
-            ]
-        ),
-        LLMTopicGuardMiddleware(),  # runs only if the keyword filter didn't block
-    ],
-)
+    if not allowed:
+        logger.info("BLOCKED (%s): %s", reason, query[:60])
+        return {"blocked": True, "messages": [AIMessage(REFUSAL)]}
+
+    logger.info("ALLOWED (%s): %s", reason, query[:60])
+    # always reset so an old block never carries over
+    return {"blocked": False}
 
 
-def safe_invoke(agent, payload, retries=2):
-    for attempt in range(retries + 1):
-        try:
-            return agent.invoke(payload)
-        except BadRequestError as e:
-            if "tool_use_failed" in str(e) and attempt < retries:
-                print(f"Tool call failed, retrying ({attempt + 1})")
-                continue
-            raise
+def route_after_guard(state: GraphState) -> str:
+    return END if state["blocked"] else "rewrite"
+
+
+def rewrite_node(state: GraphState) -> dict:
+    messages = state["messages"]
+    question = messages[-1].content
+    history = build_history(messages[:-1])
+
+    if not history:  # first message of the session: nothing to resolve
+        return {"standalone_question": question}
+
+    try:
+        reply = rewrite_llm.invoke(REWRITE_PROMPT.format(
+            history=history, question=question))
+        rewritten = reply.content.strip() if isinstance(reply.content, str) else ""
+    except Exception as e:
+        logger.warning("Rewrite failed, using original question: %s", e)
+        rewritten = ""
+
+    return {"standalone_question": rewritten or question}
+
+
+def rag_node(state: GraphState) -> dict:
+    try:
+        answer = agentic_rag_agent(state["standalone_question"], state["role"])
+    except Exception:
+        logger.exception("agentic_rag_agent failed")
+        answer = ERROR_REPLY
+    return {"messages": [AIMessage(answer)]}
+
+
+def build_app():
+    graph = StateGraph(GraphState)
+    graph.add_node("guard", guard_node)
+    graph.add_node("rewrite", rewrite_node)
+    graph.add_node("rag", rag_node)
+
+    graph.add_edge(START, "guard")
+    graph.add_conditional_edges("guard", route_after_guard, {
+                                "rewrite": "rewrite", END: END})
+    graph.add_edge("rewrite", "rag")
+    graph.add_edge("rag", END)
+
+    return graph.compile(checkpointer=InMemorySaver())
+
+
+app = build_app()
+
+
+# ---------------------------------------------------------------------------
+# Public entry point (main.py will call this)
+# ---------------------------------------------------------------------------
+def ask(query: str, role: str, session_id: str) -> str:
+    """
+    query      : the user's message
+    role       : resolved from the user's JWT / email by main.py (never from the model)
+    session_id : unique per user session; it is the memory key (LangGraph thread_id)
+    """
+    query = query.strip()
+    if not query:
+        return "Please type a question."
+
+    result = app.invoke(
+        {"messages": [HumanMessage(query)], "role": role},
+        config={"configurable": {"thread_id": session_id}},
+    )
+    return result["messages"][-1].content
 
 
 if __name__ == "__main__":
-    tests = [
-        "who is cristiano ronaldo",         # expect: blocked by Jev guard
-        "write a python function to sort",  # expect: blocked by Jev guard
-        "who is FN300PN",                   # expect: passes (employee ID)
-        "what is our leave policy?",        # expect: passes to the agent
-    ]
-    for q in tests:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+    TEST_ROLE = "admin"  # TEMP: will come from the JWT in main.py
+
+    print("--- session A ---")
+    for q in [
+        "who is cristiano ronaldo",   # expect: blocked, no retrieval
+        "who is FINEMP1078",          # expect: answer
+        "who is her manager?",        # expect: follow-up resolved via memory
+        "what is our leave policy?",  # expect: answer
+    ]:
         print(f"\n=== {q}")
-        result = safe_invoke(
-            filtered_agent,
-            {"messages": [{"role": "user", "content": q}]},
-        )
-        print(result["messages"][-1].content)
+        print(ask(q, TEST_ROLE, session_id="session-A"))
+
+    print("\n--- session B (separate memory) ---")
+    print(ask("who is her manager?", TEST_ROLE, session_id="session-B"))
