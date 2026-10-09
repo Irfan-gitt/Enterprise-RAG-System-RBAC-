@@ -1,115 +1,106 @@
-"""Query expansion for vector search: multi-query rewriting + HyDE.
+"""Query expansion for hybrid search: multi-query rewriting + HyDE.
 
-Problem this solves: a user asking "why hasn't my travel money come
-back" shares almost no vocabulary with a doc titled "Reimbursement
-Processing SLA" — plain vector_search(query) embeds the user's literal
-wording, and if that wording is far enough from the doc's phrasing, the
-embedding similarity is too weak to retrieve it.
+Users often ask indirectly ("why hasn't my travel money come back") while the
+document uses other words ("Reimbursement Processing SLA"). Two LLM steps
+bridge that gap:
 
-Two techniques, both LLM-based, used together here:
+1. Multi-query: rewrite the question in the document's own vocabulary.
+2. HyDE: write a short hypothetical answer and search with that text.
 
-1. Multi-query rewriting — ask an LLM for a few alternate phrasings of
-   the same question (different vocabulary, same intent), embed and
-   search with EACH one, then merge results. Increases the chance that
-   at least one phrasing lands close to the doc's actual wording.
+Every phrasing goes through vector search and BM25 (HyDE text is vector-only).
+All ranked lists are merged with Reciprocal Rank Fusion.
 
-2. HyDE (Hypothetical Document Embeddings) — ask an LLM to write a short
-   HYPOTHETICAL ANSWER, as if it were a snippet from the actual policy
-   doc, then embed THAT instead of the question. Answers tend to be
-   semantically closer to other answers/docs than questions are to
-   answers, so this often out-performs even the best query rewrite.
-
-Both are merged into the existing hybrid (vector + BM25) pipeline via
-the same reciprocal_rank_fusion() used in hybrid_search.py.
-
-Requires: pip install langchain-groq
-Needs GROQ_API_KEY set in your environment / .env — get a free key at
-https://console.groq.com/keys (no cost, generous free-tier rate limits).
+Needs GROQ_API_KEY in .env. Quick manual test, from the project root:
+    python -m retrieval_methods.multi_query_rtrvl "your question" -d engineering
 """
 
 from __future__ import annotations
 
+import argparse
 import json
+import logging
+import re
+from functools import lru_cache
 
 from dotenv import load_dotenv
-from langchain_groq import ChatGroq
 from langchain_core.documents import Document
+from langchain_groq import ChatGroq
 
-from retrieval_methods.hybrid_retrieval import bm25_search, reciprocal_rank_fusion, rerank, vector_search
+from retrieval_methods.hybrid_retrieval import (
+    bm25_search,
+    reciprocal_rank_fusion,
+    rerank,
+    vector_search,
+)
 
 load_dotenv()
+log = logging.getLogger(__name__)
 
-# llama-3.1-8b-instant was deprecated by Groq (Aug 2026); gpt-oss-20b is
-# their lightweight replacement — plenty for a rewriting task like this,
-# no need for the heavier 120b variant.
-LLM = ChatGroq(model="openai/gpt-oss-20b", temperature=0.3, max_tokens=400)
+MODEL = "openai/gpt-oss-20b"
+MAX_TOKENS = 2000    # gpt-oss "thinks" first and thinking counts toward this limit
+CANDIDATES = 10      # results fetched per individual search, before merging
 
-DEPARTMENT = "hr"                  # <- change this to switch department
-QUERY = "why hasn't my travel money come back yet"   # <- change this to test
+VARIANTS_PROMPT = """A user asked a question about their company's internal documents.
+The question may be indirect: it may describe a situation instead of naming
+the policy, process or system it is about.
 
-
-# --------------------------------------------------------------------------
-# 1. Multi-query rewriting
-# --------------------------------------------------------------------------
-
-def generate_query_variants(query: str, n: int = 3) -> list[str]:
-    """Ask the LLM for n alternate phrasings of the same question, using
-    more formal/policy-style vocabulary. Falls back to just [query] if
-    the LLM call or parsing fails, so this step degrades safely.
-    """
-    prompt = f"""Rewrite the following user question as {n} alternate
-phrasings that a formal company policy document would use, while
-preserving the exact same intent. Use more formal, domain-specific
-vocabulary (e.g. "reimbursement", "processing time", "SLA") instead of
-casual phrasing where appropriate.
+First work out which topic, policy or process a company document would use to
+answer it. Then write {n} different search phrasings that such a document
+would use, with formal, domain-specific words. Keep the same intent. Do not
+answer the question.
 
 User question: "{query}"
 
-Respond with ONLY a JSON array of {n} strings, nothing else. Example:
-["...", "...", "..."]"""
+Reply with ONLY a JSON array of {n} strings. Example: ["...", "...", "..."]"""
 
-    try:
-        response = LLM.invoke(prompt)
-        text = response.content.strip()
-        # Strip accidental markdown fences.
-        if text.startswith("```"):
-            text = text.strip("`").removeprefix("json").strip()
-        variants = json.loads(text)
-        if isinstance(variants, list) and all(isinstance(v, str) for v in variants):
-            return variants[:n]
-    except Exception:
-        pass
-    return [query]
-
-
-# --------------------------------------------------------------------------
-# 2. HyDE — hypothetical document embeddings
-# --------------------------------------------------------------------------
-
-def generate_hyde_document(query: str) -> str | None:
-    """Ask the LLM to write a short hypothetical passage — as if it were
-    an excerpt from the actual policy/report doc — that would answer this
-    query. Returns None if generation fails, so this step is skippable.
-    """
-    prompt = f"""Write a short (2-4 sentence) hypothetical excerpt from a
-formal company policy or financial report document that would answer
-this question. Write it as if it were pulled directly from that
-document — formal tone, specific-sounding details, no meta-commentary,
-no "here is" preamble. Just the excerpt itself.
+HYDE_PROMPT = """Write a short (2-4 sentence) hypothetical excerpt from a formal company
+document (engineering handbook, HR policy or finance report) that would answer
+this question. Formal tone, specific-sounding details, no preamble, no
+commentary. Just the excerpt.
 
 Question: "{query}\""""
 
+
+@lru_cache(maxsize=1)
+def _llm() -> ChatGroq:
+    """Created on first use, so importing this module never needs the API key."""
+    return ChatGroq(model=MODEL, temperature=0, max_tokens=MAX_TOKENS)
+
+
+def _ask(prompt: str, task: str) -> str | None:
+    """Call the LLM. Returns None (and logs why) instead of raising."""
     try:
-        response = LLM.invoke(prompt)
-        text = response.content.strip()
-        return text if text else None
-    except Exception:
+        text = (_llm().invoke(prompt).content or "").strip()
+    except Exception as exc:
+        log.warning("%s: LLM call failed: %s", task, exc)
         return None
+    if not text:
+        log.warning(
+            "%s: LLM returned empty text (is MAX_TOKENS too low?)", task)
+        return None
+    return text
 
 
-# --------------------------------------------------------------------------
-# Full pipeline: expand, search every variant, merge everything
-# --------------------------------------------------------------------------
+def generate_query_variants(query: str, n: int = 3) -> list[str]:
+    """Return up to n rewrites of the query, or [] if the LLM step fails."""
+    text = _ask(VARIANTS_PROMPT.format(n=n, query=query), "query rewrite")
+    if not text:
+        return []
+    match = re.search(r"\[.*\]", text, re.S)
+    try:
+        variants = json.loads(match.group(0)) if match else None
+    except json.JSONDecodeError:
+        variants = None
+    if not (isinstance(variants, list) and all(isinstance(v, str) for v in variants)):
+        log.warning("query rewrite: could not parse reply: %r", text[:150])
+        return []
+    return variants[:n]
+
+
+def generate_hyde_document(query: str) -> str | None:
+    """Return a short hypothetical answer passage, or None if the LLM step fails."""
+    return _ask(HYDE_PROMPT.format(query=query), "HyDE")
+
 
 def expanded_hybrid_search(
     query: str,
@@ -119,46 +110,37 @@ def expanded_hybrid_search(
     use_hyde: bool = True,
     use_reranker: bool = False,
 ) -> list[Document]:
-    """Multi-query + HyDE + BM25, all merged via RRF, optionally reranked."""
-    variants = generate_query_variants(query, n=n_variants)
-    search_queries = [query] + variants
+    """Multi-query + HyDE + BM25, merged with RRF. Always returns a list.
 
-    if use_hyde:
-        hyde_doc = generate_hyde_document(query)
-        if hyde_doc:
-            search_queries.append(hyde_doc)
+    If an LLM step fails it is skipped (and logged), so the search still
+    works with whatever phrasings are left, down to the plain query.
+    """
+    variants = generate_query_variants(query, n_variants)
+    hyde = generate_hyde_document(query) if use_hyde else None
+    log.info("rewrites=%s | hyde=%r", variants, (hyde or "")[:120])
 
-    # One vector_search per phrasing (dedup identical strings to save calls).
-    ranked_lists = [
-        vector_search(q, department, k=10) for q in dict.fromkeys(search_queries)
-    ]
-    # BM25 stays on the original query only — expansion is a vector-search
-    # fix for vocabulary mismatch; BM25 already handles exact terms fine.
-    ranked_lists.append(bm25_search(query, department, k=10))
+    # dedupe, keep order
+    text_queries = list(dict.fromkeys([query, *variants]))
+    vector_queries = text_queries + ([hyde] if hyde else [])
+
+    ranked_lists = [vector_search(q, department, k=CANDIDATES)
+                    for q in vector_queries]
+    ranked_lists += [bm25_search(q, department, k=CANDIDATES)
+                     for q in text_queries]
 
     merged = reciprocal_rank_fusion(ranked_lists)
-
-    if use_reranker:
-        return rerank(query, merged, top_k=k)
-    return merged[:k]
+    return rerank(query, merged, top_k=k) if use_reranker else merged[:k]
 
 
 if __name__ == "__main__":
-    print(f"Query: {QUERY}\n")
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("query")
+    parser.add_argument("-d", "--department", default="engineering")
+    parser.add_argument("-k", type=int, default=5)
+    args = parser.parse_args()
 
-    variants = generate_query_variants(QUERY)
-    print("Rewritten variants:")
-    for v in variants:
-        print(f"  - {v}")
-
-    hyde = generate_hyde_document(QUERY)
-    print(f"\nHyDE hypothetical doc:\n  {hyde}\n")
-
-    results = expanded_hybrid_search(QUERY, DEPARTMENT, k=5)
-    print("Results:")
-    if not results:
-        print("No results.")
-    for i, doc in enumerate(results, 1):
-        filename = doc.metadata.get("filename", "unknown")
-        print(f"\n[{i}] {filename}")
+    for rank, doc in enumerate(expanded_hybrid_search(args.query, args.department, k=args.k), 1):
+        print(
+            f"\n[{rank}] {doc.metadata.get('filename', 'unknown')} | {doc.metadata.get('section', '')}")
         print(doc.page_content[:300])
