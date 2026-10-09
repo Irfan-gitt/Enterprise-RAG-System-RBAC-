@@ -1,3 +1,5 @@
+"""THIS is an example of a RAG system with an agentic finalizing agent that checks the RAG output and ensures it meets the user's needs. The system uses a hybrid retrieval method to fetch relevant documents based on the user's question and role, and then the finalizing agent verifies the output before presenting it to the user."""
+
 from __future__ import annotations
 
 from rbac import ROLE_PERMISSIONS
@@ -113,7 +115,7 @@ def retrieval_category(question):
 
 
 def retriver(question: str, role: str) -> list:
-    # Unknown role -> least privilege. sorted() makes the order the same every run.
+
     departments = sorted(ROLE_PERMISSIONS.get(role, {"general"}))
     category = retrieval_category(question)
 
@@ -158,14 +160,13 @@ def rag_agent(question: str, system_answer: str):
     return response
 
 
-def main():
-    while True:
-        user_input = input("You: ")
-        role = "admin"
-        system_answer = retriver(user_input, role)
-        ss = rag_agent(user_input, system_answer)
-        print(ss)
+def agentic_rag_agent(user_input, role):
+
+    system_answer = retriver(user_input, role)
+    final = rag_agent(user_input, system_answer)
+
+    return final
 
 
 if __name__ == "__main__":
-    main()
+    print(agentic_rag_agent("who is FINEMP1026", "hr"))
