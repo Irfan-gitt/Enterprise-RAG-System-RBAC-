@@ -1,152 +1,188 @@
-"""Test cases for the lookup_search / specific_search / summarize_search
-router, plus a runner that calls jev and checks it against expected
-labels.
+from groq import BadRequestError
+import re
+from typing import Any
 
-Three groups per category:
-  - clear-cut: should be obvious, if these fail the category
-    description itself needs fixing, not the model.
-  - edge cases: deliberately ambiguous, sitting on the boundary between
-    two categories. These are the ones actually worth watching — a
-    classifier that nails the clear-cut cases but fails these still
-    isn't reliable in production.
+from dotenv import load_dotenv
+from langchain.agents import create_agent
+from langchain.agents.middleware import AgentMiddleware, AgentState, hook_config
+from langchain_core.messages import AIMessage
+from langchain_core.tools import tool
+from langchain_groq import ChatGroq
+from langgraph.runtime import Runtime
 
-Fill in the `client.system_one(...)` call in run_tests() to match your
-actual client import/instantiation, then run this file directly.
-"""
+load_dotenv()  # loads GROQ_API_KEY from .env
 
-from __future__ import annotations
+# Main agent model
+llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0)
 
-# from your_client_module import client   # <- wire up your actual client
-# from your_choice_module import Choice
+REFUSAL = (
+    "I can only help with company-related questions for your role. "
+    "Please ask something related to your work."
+)
 
-TEST_CASES = [
-    # ---------------------------------------------------------------
-    # lookup_search — named person, matched by ID/email/phone/name
-    # ---------------------------------------------------------------
-    {"query": "what is FINEMP1042's salary", "expected": "lookup_search"},
-    {"query": "find isha.chowdhury@fintechco.com", "expected": "lookup_search"},
-    {"query": "who is Vihaan Desai", "expected": "lookup_search"},
-    {"query": "what is the phone number for employee FINEMP1071",
-        "expected": "lookup_search"},
-    {"query": "show me the record for Vivaan Verma", "expected": "lookup_search"},
-    # edge cases
-    {
-        "query": "find the employee id of the person who joined in 2020 and has a salary greater than 100000",
-        "expected": "lookup_search",  # names no specific person — arguably NOT lookup_search;
-        # see note below, this is the query you originally tested with jev
-    },
-    {
-        "query": "what's my manager's email address",
-        # "my" implies a specific person (the asker), even with no
-        "expected": "lookup_search",
-        # name/ID given explicitly — tests whether jev requires an EXPLICIT identifier
-    },
-    {
-        "query": "list everyone in the Finance department",
-        # plural/all-records, not ONE named person — should NOT
-        "expected": "specific_search",
-        # be lookup_search despite being about "people"
-    },
-
-    # ---------------------------------------------------------------
-    # specific_search — single fact/number/date/policy detail, no identity
-    # ---------------------------------------------------------------
-    {"query": "what is the leave policy", "expected": "specific_search"},
-    {"query": "what was Q1 2024 revenue", "expected": "specific_search"},
-    {"query": "when is the reimbursement deadline", "expected": "specific_search"},
-    {"query": "how many sick leave days do employees get",
-        "expected": "specific_search"},
-    {"query": "what is the gross margin for 2024", "expected": "specific_search"},
-    # edge cases
-    {
-        "query": "how was the previous year company turnover",
-        # given verbatim in your own criteria text — sanity check
-        "expected": "specific_search",
-    },
-    {
-        "query": "what is the dress code on Fridays",
-        # policy detail, but phrased almost like a "why/how" question —
-        "expected": "specific_search",
-        # tests whether jev over-triggers summarize_search on question words alone
-    },
-    {
-        "query": "summarize the reimbursement policy",
-        # contains the word "summarize" but is a straight single-topic
-        "expected": "specific_search",
-        # lookup, not a personal/indirect question — tests literal keyword bias
-    },
-
-    # ---------------------------------------------------------------
-    # summarize_search — indirect/personal "why" questions, vocabulary
-    # mismatch vs. the policy doc's own wording
-    # ---------------------------------------------------------------
-    {"query": "why is my leave request getting rejected",
-        "expected": "summarize_search"},
-    {"query": "why haven't I got my travel money back yet",
-        "expected": "summarize_search"},
-    {"query": "why was my reimbursement denied", "expected": "summarize_search"},
-    {"query": "why hasn't my salary been credited this month",
-        "expected": "summarize_search"},
-    {"query": "why can't I book more than 2 work from home days",
-        "expected": "summarize_search"},
-    # edge cases
-    {
-        "query": "why is the Q3 vendor cost higher than Q2",
-        # "why" wording, but about company-wide FACTS/numbers,
-        "expected": "specific_search",
-        # not the asker's personal situation — tests whether jev over-triggers
-        # summarize_search on the word "why" alone
-    },
-    {
-        "query": "my leave request was rejected, what should I do",
-        "expected": "summarize_search",  # no "why", but same personal/indirect shape —
-        # tests whether jev requires the literal word "why"
-    },
-    {
-        "query": "is there a penalty for being late to work repeatedly",
-        # personal-situation flavored but no "my"/"I" pronoun at all —
-        "expected": "summarize_search",
-        # tests whether jev needs first-person language explicitly
-    },
-]
+# EDIT THIS: the more specific it is, the more accurate the guard becomes
+COMPANY_DESCRIPTION = (
+    "An internal assistant for our company's employees. It answers questions "
+    "about HR policies, benefits, leave, departments, employees and their roles, "
+    "projects, onboarding, and internal processes, based on company documents."
+)
 
 
-def run_tests():
-    """Call jev on every test case and compare to the expected label."""
-    results = []
-    for case in TEST_CASES:
-        # response = client.system_one(
-        #     model="typesafe/jev-1.13",
-        #     state={"question": case["query"]},
-        #     questions={"category": Choice(instructions=case["query"], criteria={...})},
-        # )
-        # predicted = response["category"]  # adjust to however jev's response is shaped
-        predicted = None  # <- wire this up
-        correct = predicted == case["expected"]
-        results.append({**case, "predicted": predicted, "correct": correct})
+# ---------------- Layer 1: keyword filter ----------------
+class ContentFilterMiddleware(AgentMiddleware):
+    """Deterministic guardrail: blocks banned requests before any LLM call."""
 
-    total = len(results)
-    correct_count = sum(r["correct"] for r in results)
-    print(
-        f"Overall: {correct_count}/{total} correct ({correct_count/total:.0%})\n")
+    def __init__(self, banned_keywords: list[str]):
+        super().__init__()
+        alts = "|".join(re.escape(k.lower()) for k in banned_keywords)
+        self.pattern = re.compile(rf"\b(?:{alts})(?:s|es|ing|ed|er)?\b")
 
-    print(f"{'query':<70}{'expected':<18}{'predicted':<18}{'ok'}")
-    print("-" * 110)
-    for r in results:
-        mark = "✓" if r["correct"] else "✗"
-        print(
-            f"{r['query'][:68]:<70}{r['expected']:<18}{str(r['predicted']):<18}{mark}")
+    @hook_config(can_jump_to=["end"])
+    def before_agent(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+        last_human = next(
+            (m for m in reversed(state["messages"]) if m.type == "human"), None
+        )
+        if last_human is None or not isinstance(last_human.content, str):
+            return None
 
-    # Per-category breakdown — useful to see if one category is
-    # systematically weaker than the others.
-    by_category: dict[str, list[bool]] = {}
-    for r in results:
-        by_category.setdefault(r["expected"], []).append(r["correct"])
-    print("\nPer-category accuracy:")
-    for category, outcomes in by_category.items():
-        acc = sum(outcomes) / len(outcomes)
-        print(f"  {category:<18}{sum(outcomes)}/{len(outcomes)} ({acc:.0%})")
+        match = self.pattern.search(last_human.content.lower())
+        if match:
+            print(f"Blocked -- keyword detected: '{match.group(0)}'")
+            return {"messages": [AIMessage(REFUSAL)], "jump_to": "end"}
+        return None
+
+
+# ---------------- Layer 2: LLM topic guard ----------------
+GUARD_PROMPT = """You are a topic classifier for an internal company assistant.
+
+Company context: {company}
+
+Classify the user's LATEST message as exactly one label:
+- COMPANY: about the company, its employees, teams, roles, projects, policies,
+  benefits, processes, or the user's work. Any person's name may be a colleague,
+  so questions about a person's role, team, manager, or work are COMPANY even if
+  you don't recognise the name.
+- OFF_TOPIC: general knowledge, news, famous people, sports, coding help, math,
+  advice unrelated to the company, jokes, or casual chit-chat.
+- UNCLEAR: you can't tell. Prefer UNCLEAR over a wrong OFF_TOPIC.
+
+Recent conversation (for follow-ups like "who is his manager?"):
+{history}
+
+Latest message: {query}
+
+Answer with ONLY one word: COMPANY, OFF_TOPIC, or UNCLEAR."""
+
+guard_llm = ChatGroq(
+    model="openai/gpt-oss-20b",  # small + cheap, separate from the main agent
+    temperature=0,
+    max_tokens=512,              # room for hidden reasoning tokens + the one-word answer
+    timeout=10,
+    max_retries=1,
+    reasoning_effort="low",      # if your langchain-groq version rejects this, upgrade it
+)
+
+
+def parse_label(text: str) -> str:
+    """Pull the first valid label out of the model's reply. Default: UNCLEAR."""
+    cleaned = text.upper().replace(" ", "_").replace("-", "_")
+    found = re.search(r"OFF_TOPIC|COMPANY|UNCLEAR", cleaned)
+    return found.group(0) if found else "UNCLEAR"
+
+
+class LLMTopicGuardMiddleware(AgentMiddleware):
+    """Blocks general-knowledge / coding / chit-chat. Fails open on any error."""
+
+    @hook_config(can_jump_to=["end"])
+    def before_agent(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
+        msgs = state["messages"]
+        last_human = next(
+            (m for m in reversed(msgs) if m.type == "human"), None)
+        if last_human is None or not isinstance(last_human.content, str):
+            return None
+
+        # last 4 earlier messages, each trimmed to save tokens
+        past = [
+            f"{m.type}: {m.content[:300]}"
+            for m in msgs[:-1]
+            if m.type in ("human", "ai") and isinstance(m.content, str) and m.content
+        ]
+        history = "\n".join(past[-4:])
+
+        try:
+            reply = guard_llm.invoke(
+                GUARD_PROMPT.format(
+                    company=COMPANY_DESCRIPTION,
+                    history=history or "(none)",
+                    query=last_human.content,
+                )
+            )
+            raw = reply.content if isinstance(reply.content, str) else ""
+            if not raw.strip():
+                print("Guard LLM returned empty output, letting request through")
+                return None
+            label = parse_label(raw)
+        except Exception as e:
+            print(f"Guard LLM failed, letting request through: {e}")
+            return None  # fail open: never block a real question because of an error
+
+        print(f"Guard label: {label}")
+        if label == "OFF_TOPIC":
+            print(
+                f"Blocked -- LLM guard: OFF_TOPIC -> {last_human.content[:60]}")
+            return {"messages": [AIMessage(REFUSAL)], "jump_to": "end"}
+        return None
+
+
+@tool
+def search_tool(query: str) -> str:
+    """Search for information."""
+    return f"Results for: {query}"
+
+
+filtered_agent = create_agent(
+    model=llm,
+    tools=[search_tool],
+    system_prompt=(
+        "You are an internal company assistant. The ONLY tool you have is "
+        "`search_tool`. Never call any other tool (such as open_file, browser, "
+        "or python). Answer using search_tool results only. If the results "
+        "don't contain the answer, say you couldn't find it."
+    ),
+    middleware=[
+        ContentFilterMiddleware(
+            banned_keywords=[
+                "weather", "sports", "cricket", "football", "movie", "joke",
+                "recipe", "celebrity", "bitcoin", "stock price",
+                "hack", "exploit", "malware", "jailbreak",
+            ]
+        ),
+        LLMTopicGuardMiddleware(),  # runs only if the keyword filter didn't block
+    ],
+)
+
+
+def safe_invoke(agent, payload, retries=2):
+    for attempt in range(retries + 1):
+        try:
+            return agent.invoke(payload)
+        except BadRequestError as e:
+            if "tool_use_failed" in str(e) and attempt < retries:
+                print(f"Tool call failed, retrying ({attempt + 1})")
+                continue
+            raise
 
 
 if __name__ == "__main__":
-    run_tests()
+    tests = [
+        "who is FN300PN",         # expect: blocked by LLM guard
+        "write a python function to sort",  # expect: blocked by LLM guard
+        "what is our leave policy?",        # expect: passes to the agent
+    ]
+    for q in tests:
+        print(f"\n=== {q}")
+        result = safe_invoke(
+            filtered_agent,
+            {"messages": [{"role": "user", "content": q}]},
+        )
+        print(result["messages"][-1].content)
