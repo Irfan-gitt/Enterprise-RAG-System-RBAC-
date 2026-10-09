@@ -251,7 +251,7 @@ def ask(query: str, role: str, session_id: str) -> str:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    TEST_ROLE = "admin"  # TEMP: will come from the JWT in main.py
+    TEST_ROLE = "general"  # TEMP: will come from the JWT in main.py
 
     print("--- session A ---")
     for q in [
