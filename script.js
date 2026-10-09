@@ -17,6 +17,7 @@ const sendBtn = document.getElementById("send-btn");
 const loadingIndicator = document.getElementById("loading-indicator");
 
 let lastQuestion = null;
+let conversationId = null; // memory thread id, issued by the server
 const roleLabels = { employee: "Employee", finance: "Finance", hr: "HR", engineering: "Engineering", marketing: "Marketing", admin: "Admin" };
 
 function getCurrentUser() {
@@ -62,6 +63,7 @@ async function login(email, password) {
 function logout() {
   Object.values(AUTH_KEYS).forEach((key) => sessionStorage.removeItem(key));
   lastQuestion = null;
+  conversationId = null;
   showLoginScreen();
 }
 
@@ -94,71 +96,42 @@ function showChatScreen() {
   document.getElementById("current-role-badge").textContent = roleLabels[user.role] || user.role;
   messagesEl.innerHTML = "";
   lastQuestion = null;
+  conversationId = null; // clearing the chat starts a fresh memory thread
   addMessage("assistant", `Welcome. You are signed in as ${roleLabels[user.role] || user.role}. Ask about the company information you are authorized to access.`);
 }
 
-function addMessage(kind, text, result = null) {
+function addMessage(kind, text) {
   const row = document.createElement("div");
   row.className = `msg-row ${kind}`;
   const bubble = document.createElement("div");
   bubble.className = "bubble";
   bubble.textContent = text;
-
-  if (result?.sources?.length) {
-    const sources = document.createElement("div");
-    sources.className = "sources-row";
-    result.sources.forEach((source) => {
-      const chip = document.createElement("span");
-      chip.className = "source-chip";
-      chip.textContent = `Source: ${source}`;
-      sources.appendChild(chip);
-    });
-    bubble.appendChild(sources);
-  }
-
-  if (result?.pagination) addPagination(bubble, result.pagination);
   row.appendChild(bubble);
   messagesEl.appendChild(row);
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
-function addPagination(container, pagination) {
-  const row = document.createElement("div");
-  row.className = "pagination-row";
-  row.append(`Page ${pagination.page} of ${pagination.total_pages} — ${pagination.total_matches} total records`);
-  for (const [label, nextPage, disabled] of [
-    ["Previous", pagination.page - 1, pagination.page <= 1],
-    ["Next", pagination.page + 1, pagination.page >= pagination.total_pages],
-  ]) {
-    const button = document.createElement("button");
-    button.textContent = label;
-    button.disabled = disabled;
-    button.addEventListener("click", () => lastQuestion && runQuery(lastQuestion, nextPage, false));
-    row.appendChild(button);
-  }
-  container.appendChild(row);
-}
-
-async function sendChatMessage(question, page) {
+async function sendChatMessage(question) {
   const response = await fetch(`${API_BASE}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${getAuthToken()}` },
-    body: JSON.stringify({ question, page, page_size: 10 }),
+    body: JSON.stringify({ question, conversation_id: conversationId }),
   });
   const data = await response.json().catch(() => ({}));
   if (response.status === 401) { logout(); throw new Error("Session expired. Please sign in again."); }
   if (response.status === 403) throw new Error("You do not have permission to access this information.");
   if (!response.ok) throw new Error(data.detail || "Unable to retrieve an answer.");
+  conversationId = data.conversation_id; // keep the same thread for the next message
   return data;
 }
 
-async function runQuery(question, page = 1, addUser = true) {
-  if (addUser) addMessage("user", question);
+async function runQuery(question) {
+  addMessage("user", question);
   loadingIndicator.hidden = false;
   sendBtn.disabled = true;
   try {
-    const result = await sendChatMessage(question, page);
-    addMessage("assistant", result.answer, result);
+    const result = await sendChatMessage(question);
+    addMessage("assistant", result.answer);
   } catch (error) {
     addMessage("assistant", error.message || "Something went wrong.");
   } finally {
