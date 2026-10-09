@@ -31,7 +31,7 @@ OPENROUTER_API_KEY = os.getenv(
     "OPENROUTER_API_KEY")
 
 
-llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0)
+llm = ChatGroq(model="openai/gpt-oss-20b", temperature=0)
 
 
 TOP_K = 10
