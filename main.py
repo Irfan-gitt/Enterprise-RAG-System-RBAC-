@@ -1,178 +1,267 @@
-"""Prototype API for the Company internal knowledge assistant.
-
-Run locally with:
-    .\\venv\\Scripts\\uvicorn.exe main:app --reload
-"""
-
-from __future__ import annotations
-
+import logging
 import os
 import re
-import uuid
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Annotated
+from typing import Annotated, TypedDict
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, status
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from fastapi.staticfiles import StaticFiles
-from jose import JWTError, jwt
-from pydantic import BaseModel, Field
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_groq import ChatGroq
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
 
-from agent import answer_question
-from rbac import ROLE_PERMISSIONS
+from rag import agentic_rag_agent
+from typesafe_sdk import Choice, TypeSafeClient
 
-load_dotenv()
+load_dotenv()  # loads GROQ_API_KEY and OPENROUTER_API_KEY from .env
 
-APP_DIR = Path(__file__).parent
-JWT_SECRET_KEY = os.getenv(
-    "JWT_SECRET_KEY", "prototype-only-change-this-secret")
-JWT_ALGORITHM = "HS256"
-TOKEN_EXPIRE_MINUTES = 120
+logger = logging.getLogger(__name__)
 
-# Prototype-only accounts. Replace this with a database, hashed passwords, or
-# an identity provider before production. Roles are never accepted from clients.
-DEMO_USERS = {
-    "employee@company.com": {"password": "demo123", "role": "employee"},
-    "finance@company.com": {"password": "demo123", "role": "finance"},
-    "hr@company.com": {"password": "demo123", "role": "hr"},
-    "engineering@company.com": {"password": "demo123", "role": "engineering"},
-    "marketing@company.com": {"password": "demo123", "role": "marketing"},
-    "admin@company.com": {"password": "demo123", "role": "admin"},
-}
-
-app = FastAPI(title="Company Internal Knowledge Assistant")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:8000", "http://127.0.0.1:8000"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+REFUSAL = (
+    "I can only help with company-related questions for your role. "
+    "Please ask something related to your work."
 )
-bearer_scheme = HTTPBearer(auto_error=False)
+ERROR_REPLY = "Sorry, something went wrong while processing your request. Please try again."
+
+COMPANY_DESCRIPTION = (
+    "An internal assistant for our company's employees. It answers questions "
+    "about HR policies, benefits, leave, departments, employees and their roles, "
+    "projects, onboarding, and internal processes, based on company documents."
+)
+
+BANNED_KEYWORDS = [
+    "hack", "exploit", "malware", "jailbreak", "prompt injection",
+    "bypass", "circumvent", "cheat", "crack", "pirate", "torrent",
+]
+_KEYWORD_PATTERN = re.compile(
+    r"\b(?:" + "|".join(re.escape(k.lower())
+                        for k in BANNED_KEYWORDS) + r")(?:s|es|ing|ed|er)?\b"
+)
+
+HISTORY_MESSAGES = 4  # how many earlier messages the guard / rewrite steps can see
+
+# Jev client (guard)
+client = TypeSafeClient(
+    api_key=os.getenv("OPENROUTER_API_KEY"),
+    base_url="https://openrouter.ai/api",
+)
+
+# Small model used only to turn follow-ups into standalone questions
+rewrite_llm = ChatGroq(
+    model="openai/gpt-oss-20b",
+    temperature=0,
+    max_tokens=512,
+    timeout=10,
+    max_retries=1,
+    reasoning_effort="low",
+)
+
+REWRITE_PROMPT = """Rewrite the user's latest question as one standalone question.
+Use the conversation ONLY to resolve references such as "he", "she", "that policy", "his manager".
+
+Rules:
+- Do not answer the question.
+- Do not add any information that is not in the conversation.
+- If the question is already standalone, return it unchanged.
+- Output only the rewritten question, nothing else.
+
+Conversation:
+{history}
+
+Latest question: {question}
+
+Standalone question:"""
 
 
-class LoginRequest(BaseModel):
-    email: str
-    password: str
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def build_history(messages: list[BaseMessage], max_chars: int = 300) -> str:
+    """Last few human/ai messages as plain text, each trimmed to save tokens."""
+    past = [
+        f"{m.type}: {m.content[:max_chars]}"
+        for m in messages
+        if m.type in ("human", "ai") and isinstance(m.content, str) and m.content
+    ]
+    return "\n".join(past[-HISTORY_MESSAGES:])
 
 
-class ChatRequest(BaseModel):
-    question: str = Field(min_length=1, max_length=2_000)
-    # Optional client-supplied conversation id. Omit it to start a fresh
-    # thread; the server will generate one and hand it back in the response
-    # so the frontend can resend it on the next turn to keep the same
-    # LangGraph memory thread going.
-    conversation_id: str | None = Field(default=None, max_length=64)
-    page: int = Field(default=1, ge=1)
-    page_size: int = Field(default=10, ge=1, le=25)
-
-
-def create_access_token(email: str, role: str) -> str:
-    expires_at = datetime.now(timezone.utc) + \
-        timedelta(minutes=TOKEN_EXPIRE_MINUTES)
-    return jwt.encode(
-        {"sub": email, "role": role, "exp": expires_at},
-        JWT_SECRET_KEY,
-        algorithm=JWT_ALGORITHM,
+def topic_check(question: str, history: str = "") -> str:
+    """Returns 'company', 'off_topic' or 'unclear'."""
+    response = client.system_one(
+        model="typesafe/jev-1.13",
+        state={"question": question,
+               "recent_conversation": history or "(none)"},
+        questions={
+            "topic": Choice(
+                instructions=(
+                    f"You guard an internal company assistant. {COMPANY_DESCRIPTION} "
+                    "Decide whether the question is about the company. "
+                    "Any person's name or ID may be a colleague, so a question about "
+                    "a named person's role, team, manager, email or record is company. "
+                    "Use recent_conversation to resolve follow-ups like "
+                    "'who is his manager?'. "
+                    "If you are unsure, choose unclear."
+                ),
+                criteria={
+                    "company": (
+                        "About the company, its employees, teams, roles, projects, "
+                        "policies, benefits, leave, reimbursement, finance, security, "
+                        "engineering processes or the user's own work. Includes any "
+                        "question about a named person or employee ID. "
+                        "Examples: 'what is the leave policy', 'who is Vihaan Desai', "
+                        "'who is FN300PN', 'what is FINEMP1042's salary', "
+                        "'why was my leave rejected', "
+                        "'what are the RTO and RPO for disaster recovery'."
+                    ),
+                    "off_topic": (
+                        "General knowledge, news, famous people, sports, entertainment, "
+                        "markets, coding help unrelated to company documents, math, "
+                        "personal advice, jokes or casual chit-chat. "
+                        "Examples: 'who is Cristiano Ronaldo', 'write a python function "
+                        "to sort a list', 'tell me a joke', 'capital of France', "
+                        "'how are you'."
+                    ),
+                    "unclear": (
+                        "You cannot tell whether it relates to the company. "
+                        "Prefer this over a wrong off_topic."
+                    ),
+                },
+            )
+        },
     )
+    return response.answers["topic"].choice
 
 
-def current_user(
-    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
-) -> dict[str, str]:
-    unauthorized = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid or expired session. Please sign in again.",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    if not credentials or credentials.scheme.lower() != "bearer":
-        raise unauthorized
+def check_query(query: str, history: str = "") -> tuple[bool, str]:
+    """Runs keyword filter then Jev topic check. Returns (allowed, reason)."""
+    match = _KEYWORD_PATTERN.search(query.lower())
+    if match:
+        return False, f"keyword:{match.group(0)}"
+
     try:
-        payload = jwt.decode(credentials.credentials,
-                             JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
-        email = payload.get("sub")
-        role = payload.get("role")
-    except JWTError as error:
-        raise unauthorized from error
-    if not isinstance(email, str) or role not in ROLE_PERMISSIONS:
-        raise unauthorized
-    return {"email": email, "role": role}
+        label = topic_check(query, history)
+    except Exception as e:
+        logger.warning("Jev guard failed, letting request through: %s", e)
+        return True, "guard_error_fail_open"  # never block a real question on an error
+
+    if label == "off_topic":
+        return False, "jev:off_topic"
+    return True, f"jev:{label}"
 
 
-def extract_metadata(answer: str) -> tuple[list[str], dict | None, str]:
-    """Adapt the existing RAG string result to a frontend-friendly response."""
-    sources = list(dict.fromkeys(re.findall(r"\[Source: ([^|\]]+)", answer)))
-    sources.extend(
-        source for source in re.findall(r"(?m)^Source:\s*([^\n]+)", answer)
-        if source not in sources
+# ---------------------------------------------------------------------------
+# Graph
+# ---------------------------------------------------------------------------
+class GraphState(TypedDict, total=False):
+    messages: Annotated[list[BaseMessage], add_messages]
+    # set by the caller on every request (never by the model)
+    role: str
+    blocked: bool
+    standalone_question: str
+
+
+def guard_node(state: GraphState) -> dict:
+    messages = state["messages"]
+    query = messages[-1].content
+    allowed, reason = check_query(query, build_history(messages[:-1]))
+
+    if not allowed:
+        logger.info("BLOCKED (%s): %s", reason, query[:60])
+        return {"blocked": True, "messages": [AIMessage(REFUSAL)]}
+
+    logger.info("ALLOWED (%s): %s", reason, query[:60])
+    # always reset so an old block never carries over
+    return {"blocked": False}
+
+
+def route_after_guard(state: GraphState) -> str:
+    return END if state["blocked"] else "rewrite"
+
+
+def rewrite_node(state: GraphState) -> dict:
+    messages = state["messages"]
+    question = messages[-1].content
+    history = build_history(messages[:-1])
+
+    if not history:  # first message of the session: nothing to resolve
+        return {"standalone_question": question}
+
+    try:
+        reply = rewrite_llm.invoke(REWRITE_PROMPT.format(
+            history=history, question=question))
+        rewritten = reply.content.strip() if isinstance(reply.content, str) else ""
+    except Exception as e:
+        logger.warning("Rewrite failed, using original question: %s", e)
+        rewritten = ""
+
+    return {"standalone_question": rewritten or question}
+
+
+def rag_node(state: GraphState) -> dict:
+    try:
+        answer = agentic_rag_agent(state["standalone_question"], state["role"])
+    except Exception:
+        logger.exception("agentic_rag_agent failed")
+        answer = ERROR_REPLY
+    return {"messages": [AIMessage(answer)]}
+
+
+def build_app():
+    graph = StateGraph(GraphState)
+    graph.add_node("guard", guard_node)
+    graph.add_node("rewrite", rewrite_node)
+    graph.add_node("rag", rag_node)
+
+    graph.add_edge(START, "guard")
+    graph.add_conditional_edges("guard", route_after_guard, {
+                                "rewrite": "rewrite", END: END})
+    graph.add_edge("rewrite", "rag")
+    graph.add_edge("rag", END)
+
+    return graph.compile(checkpointer=InMemorySaver())
+
+
+app = build_app()
+
+
+# ---------------------------------------------------------------------------
+# Public entry point (main.py will call this)
+# ---------------------------------------------------------------------------
+def ask(query: str, role: str, session_id: str) -> str:
+    """
+    query      : the user's message
+    role       : resolved from the user's JWT / email by main.py (never from the model)
+    session_id : unique per user session; it is the memory key (LangGraph thread_id)
+    """
+    query = query.strip()
+    if not query:
+        return "Please type a question."
+
+    result = app.invoke(
+        {"messages": [HumanMessage(query)], "role": role},
+        config={"configurable": {"thread_id": session_id}},
     )
-    list_match = re.search(
-        r"\[List results: (\d+) total matches; page (\d+) of (\d+); showing (\d+) records\.\]",
-        answer,
-    )
-    pagination = None
-    if list_match:
-        total, page, total_pages, shown = map(int, list_match.groups())
-        pagination = {
-            "total_matches": total,
-            "page": page,
-            "page_size": shown,
-            "total_pages": total_pages,
-        }
-    clean_answer = re.sub(r"^\[List results: .*?\]\s*", "", answer)
-    return sources, pagination, clean_answer
+    return result["messages"][-1].content
 
 
-@app.post("/api/auth/login")
-def login(request: LoginRequest) -> dict:
-    email = request.email.strip().lower()
-    user = DEMO_USERS.get(email)
-    if not user or request.password != user["password"]:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password.")
-    role = user["role"]
-    return {
-        "access_token": create_access_token(email, role),
-        "token_type": "bearer",
-        "user": {"email": email, "role": role},
-    }
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
+    TEST_ROLE = "admin"  # TEMP: will come from the JWT in main.py
 
-@app.post("/api/chat")
-def chat(request: ChatRequest, user: Annotated[dict[str, str], Depends(current_user)]) -> dict:
-    conversation_id = request.conversation_id or uuid.uuid4().hex
-    # Namespace the LangGraph thread with the authenticated email so a
-    # guessed or shared conversation_id can never pull up someone else's
-    # chat history — the checkpointer only keys on thread_id.
-    thread_id = f"{user['email']}:{conversation_id}"
-    answer = answer_question(
-        request.question.strip(),
-        user["role"],
-        thread_id=thread_id,
-        page=request.page,
-        page_size=request.page_size,
-    )
-    sources, pagination, clean_answer = extract_metadata(answer)
-    return {
-        "answer": clean_answer,
-        "sources": sources,
-        "pagination": pagination,
-        "conversation_id": conversation_id,
-    }
+    print("--- session A ---")
+    for q in [
+        "who is cristiano ronaldo",   # expect: blocked, no retrieval
+        "who is FINEMP1078",          # expect: answer
+        "who is her manager?",        # expect: follow-up resolved via memory
+        "what is our leave policy?",  # expect: answer
+    ]:
+        print(f"\n=== {q}")
+        print(ask(q, TEST_ROLE, session_id="session-A"))
 
-
-@app.get("/api/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-@app.get("/")
-def frontend() -> FileResponse:
-    return FileResponse(APP_DIR / "index.html")
-
-
-app.mount("/", StaticFiles(directory=APP_DIR, html=True), name="frontend")
+    print("\n--- session B (separate memory) ---")
+    print(ask("who is her manager?", TEST_ROLE, session_id="session-B"))
