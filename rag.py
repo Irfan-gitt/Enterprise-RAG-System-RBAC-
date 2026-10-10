@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+
 from rbac import ROLE_PERMISSIONS
 import os
 from typesafe_sdk import Choice, TypeSafeClient
@@ -22,8 +23,8 @@ from retrieval_methods.multi_query_rtrvl import expanded_hybrid_search
 from retrieval_methods.hybrid_retrieval import reciprocal_rank_fusion, rerank
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
+from llm_pool import LLMPool
 
-load_dotenv()
 EMBEDDING = JinaEmbeddings(model_name="jina-embeddings-v3")
 DB_DIR = Path("chroma_db")
 
@@ -31,7 +32,7 @@ OPENROUTER_API_KEY = os.getenv(
     "OPENROUTER_API_KEY")
 
 
-llm = ChatGroq(model="openai/gpt-oss-20b", temperature=0)
+llm = LLMPool("openai/gpt-oss-20b", temperature=0)
 
 
 TOP_K = 10
