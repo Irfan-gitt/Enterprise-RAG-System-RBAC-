@@ -1,3 +1,4 @@
+from llm_pool import LLMPool
 import logging
 import os
 import re
@@ -13,7 +14,7 @@ from langgraph.graph.message import add_messages
 from rag import agentic_rag_agent
 from typesafe_sdk import Choice, TypeSafeClient
 
-load_dotenv()  # loads GROQ_API_KEY and OPENROUTER_API_KEY from .env
+# loads GROQ_API_KEY and OPENROUTER_API_KEY from .env
 
 logger = logging.getLogger(__name__)
 
@@ -50,12 +51,12 @@ client = TypeSafeClient(
 )
 
 # Small model used only to turn follow-ups into standalone questions
-rewrite_llm = ChatGroq(
-    model="openai/gpt-oss-20b",
+
+rewrite_llm = LLMPool(
+    "openai/gpt-oss-20b",
     temperature=0,
-    max_tokens=512,
+    max_tokens=1024,
     timeout=10,
-    max_retries=1,
     reasoning_effort="low",
 )
 
