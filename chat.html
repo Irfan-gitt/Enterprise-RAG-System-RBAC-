@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Chat | Company Knowledge Assistant</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+
+<body>
+  <section id="chat-screen" class="screen chat-screen" hidden>
+    <header class="chat-header">
+      <div class="chat-header-left">
+        <div class="brand-logo small">CO</div>
+        <span class="chat-app-name">Company Knowledge Assistant</span>
+      </div>
+      <div class="chat-header-right">
+        <span id="current-username" class="current-username"></span>
+        <span id="current-role-badge" class="role-badge"></span>
+        <button id="logout-btn" class="btn-secondary">Logout</button>
+      </div>
+    </header>
+    <main class="chat-main">
+      <div class="chat-toolbar"><button id="clear-chat-btn" class="btn-ghost">New chat</button></div>
+      <div id="messages" class="messages"></div>
+      <div id="loading-indicator" class="loading-indicator" hidden>
+        <span class="dot"></span><span class="dot"></span><span class="dot"></span> Searching company documents…
+      </div>
+      <form id="chat-form" class="chat-input-bar">
+        <textarea id="chat-input" placeholder="Ask a question about company knowledge… (Shift+Enter for a new line)"
+          rows="1"></textarea>
+        <button type="submit" id="send-btn" class="btn-primary send-btn">Send</button>
+      </form>
+    </main>
+  </section>
+
+  <!-- Markdown rendering for replies (pinned versions). If these fail to load, replies show as plain text. -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+  <script src="/chat.js"></script>
+</body>
+
+</html>
