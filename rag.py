@@ -1,4 +1,13 @@
-"""THIS is an example of a RAG system with an agentic finalizing agent that checks the RAG output and ensures it meets the user's needs. The system uses a hybrid retrieval method to fetch relevant documents based on the user's question and role, and then the finalizing agent verifies the output before presenting it to the user."""
+"""
+This is an agentic RAG system that takes a user question and returns a final answer.
+User Question
+    -> Classify Retrieval Category
+    -> Select Retrieval Strategy (BM25 / Hybrid / Expanded Hybrid)
+    -> Fuse Results (RRF)
+    -> Rerank Results (if multiple departments)
+    -> Finalizing Agent (LLM)
+    -> Final Answer
+"""
 
 from __future__ import annotations
 
