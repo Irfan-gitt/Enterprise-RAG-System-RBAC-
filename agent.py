@@ -14,13 +14,10 @@ from langgraph.graph.message import add_messages
 from rag import agentic_rag_agent
 from typesafe_sdk import Choice, TypeSafeClient
 
-# loads GROQ_API_KEY and OPENROUTER_API_KEY from .env
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
+
 REFUSAL = (
     "I can only help with company-related questions for your role. "
     "Please ask something related to your work."
@@ -50,7 +47,6 @@ client = TypeSafeClient(
     base_url="https://openrouter.ai/api",
 )
 
-# Small model used only to turn follow-ups into standalone questions
 
 rewrite_llm = LLMPool(
     "openai/gpt-oss-20b",
@@ -77,9 +73,6 @@ Latest question: {question}
 Standalone question:"""
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 def build_history(messages: list[BaseMessage], max_chars: int = 300) -> str:
     """Last few human/ai messages as plain text, each trimmed to save tokens."""
     past = [
@@ -154,12 +147,11 @@ def check_query(query: str, history: str = "") -> tuple[bool, str]:
     return True, f"jev:{label}"
 
 
-# ---------------------------------------------------------------------------
 # Graph
-# ---------------------------------------------------------------------------
+
 class GraphState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
-    # set by the caller on every request (never by the model)
+
     role: str
     blocked: bool
     standalone_question: str
@@ -175,7 +167,7 @@ def guard_node(state: GraphState) -> dict:
         return {"blocked": True, "messages": [AIMessage(REFUSAL)]}
 
     logger.info("ALLOWED (%s): %s", reason, query[:60])
-    # always reset so an old block never carries over
+
     return {"blocked": False}
 
 
@@ -229,9 +221,6 @@ def build_app():
 app = build_app()
 
 
-# ---------------------------------------------------------------------------
-# Public entry point (main.py will call this)
-# ---------------------------------------------------------------------------
 def ask(query: str, role: str, session_id: str) -> str:
     """
     query      : the user's message
@@ -249,10 +238,11 @@ def ask(query: str, role: str, session_id: str) -> str:
     return result["messages"][-1].content
 
 
+# THESE Are tst codes
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    TEST_ROLE = "general"  # TEMP: will come from the JWT in main.py
+    TEST_ROLE = "general"
 
     print("--- session A ---")
     for q in [
