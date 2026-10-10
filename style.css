@@ -741,3 +741,69 @@ body {
 .example-q-btn.deny:hover {
   background: var(--gray-100);
 }
+
+/* ---------- test panel ---------- */
+.test-panel {
+  background: var(--white);
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius-md);
+  margin-bottom: 8px;
+}
+
+.test-panel summary {
+  cursor: pointer;
+  padding: 9px 14px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--gray-700);
+}
+
+.test-body {
+  padding: 0 14px 12px;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+.test-group {
+  margin-top: 8px;
+}
+
+.test-label {
+  display: block;
+  font-size: 11.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--gray-500);
+}
+
+.doc-link {
+  display: inline-block;
+  background: var(--gray-100);
+  border: 1px solid var(--gray-200);
+  color: var(--gray-700);
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.doc-link:hover {
+  background: var(--gray-200);
+}
+
+/* keep everything inside the screen and lift the chat bar */
+.messages {
+  min-height: 0;
+}
+
+.chat-main {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.chat-input-bar {
+  margin-bottom: 28px;
+  flex-shrink: 0;
+}
