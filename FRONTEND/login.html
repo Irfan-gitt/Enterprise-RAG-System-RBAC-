@@ -10,32 +10,43 @@
 
 <body>
   <section id="login-screen" class="screen login-screen" hidden>
-    <div class="login-card">
-      <div class="brand">
-        <div class="brand-logo">CO</div>
-        <h1 class="brand-title">Company Knowledge Assistant</h1>
-        <p class="brand-subtitle">Secure access to company knowledge</p>
-      </div>
-      <form id="login-form" class="login-form" autocomplete="on">
-        <div class="field-group">
-          <label for="username">Company email</label>
-          <input type="email" id="username" name="username" autocomplete="username" placeholder="e.g. hr@company.com"
-            required />
+    <div class="login-layout">
+
+      <aside class="demo-panel">
+        <h2 class="demo-title">Demo accounts</h2>
+        <p class="demo-hint">Click an account to fill the form, then press Sign In. Password for all:
+          <strong>demo123</strong></p>
+        <div id="demo-list" class="demo-list"></div>
+      </aside>
+
+      <div class="login-card">
+        <div class="brand">
+          <div class="brand-logo">CO</div>
+          <h1 class="brand-title">Company Knowledge Assistant</h1>
+          <p class="brand-subtitle">Secure access to company knowledge</p>
         </div>
-        <div class="field-group">
-          <label for="password">Password</label>
-          <div class="password-wrapper">
-            <input type="password" id="password" name="password" autocomplete="current-password"
-              placeholder="Enter your password" required />
-            <button type="button" id="toggle-password" class="toggle-password" aria-label="Show password">Show</button>
+        <form id="login-form" class="login-form" autocomplete="on">
+          <div class="field-group">
+            <label for="username">Company email</label>
+            <input type="email" id="username" name="username" autocomplete="username" placeholder="e.g. hr@company.com"
+              required />
           </div>
-        </div>
-        <div id="login-error" class="error-box" hidden></div>
-        <button type="submit" id="login-btn" class="btn-primary">
-          <span id="login-btn-text">Sign In</span><span id="login-spinner" class="spinner" hidden></span>
-        </button>
-      </form>
-      <p class="demo-role-label">Prototype demo accounts use password: <strong>demo123</strong></p>
+          <div class="field-group">
+            <label for="password">Password</label>
+            <div class="password-wrapper">
+              <input type="password" id="password" name="password" autocomplete="current-password"
+                placeholder="Enter your password" required />
+              <button type="button" id="toggle-password" class="toggle-password"
+                aria-label="Show password">Show</button>
+            </div>
+          </div>
+          <div id="login-error" class="error-box" hidden></div>
+          <button type="submit" id="login-btn" class="btn-primary">
+            <span id="login-btn-text">Sign In</span><span id="login-spinner" class="spinner" hidden></span>
+          </button>
+        </form>
+      </div>
+
     </div>
   </section>
   <script src="/login.js"></script>
