@@ -122,7 +122,7 @@ def chat(request: ChatRequest, user: Annotated[dict[str, str], Depends(current_u
     return {"answer": answer, "conversation_id": conversation_id}
 
 
-@app.get("/api/health")
+@app.api_route("/api/health", methods=["GET", "HEAD"])
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
