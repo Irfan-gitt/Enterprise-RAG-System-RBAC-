@@ -127,8 +127,13 @@ def health() -> dict[str, str]:
 
 
 @app.get("/")
-def frontend() -> FileResponse:
-    return FileResponse(APP_DIR / "index.html")
+def login_page() -> FileResponse:
+    return FileResponse(APP_DIR / "login.html")
+
+
+@app.get("/chat")
+def chat_page() -> FileResponse:
+    return FileResponse(APP_DIR / "chat.html")
 
 
 @app.get("/style.css")
@@ -136,6 +141,11 @@ def style() -> FileResponse:
     return FileResponse(APP_DIR / "style.css")
 
 
-@app.get("/script.js")
-def script() -> FileResponse:
-    return FileResponse(APP_DIR / "script.js")
+@app.get("/login.js")
+def login_js() -> FileResponse:
+    return FileResponse(APP_DIR / "login.js")
+
+
+@app.get("/chat.js")
+def chat_js() -> FileResponse:
+    return FileResponse(APP_DIR / "chat.js")
