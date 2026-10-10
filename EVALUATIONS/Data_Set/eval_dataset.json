@@ -1,0 +1,99 @@
+[
+  {
+    "question": "I got a new phone and now every time I sign in it asks me for an extra code or my fingerprint, why is that?",
+    "ground_truth": "FinSolve's user authentication includes multi-factor authentication (MFA) via SMS, email, or authenticator apps, and biometric authentication for mobile devices.",
+    "gold": [
+      "5.1.1 Authentication and Authorization"
+    ],
+    "type": "indirect"
+  },
+  {
+    "question": "Our team keeps skipping the morning check-in, how long is it even supposed to take?",
+    "ground_truth": "The daily standup is a 15-minute meeting to track progress and address blockers.",
+    "gold": [
+      "4.1.1 Scrum Ceremonies"
+    ],
+    "type": "indirect"
+  },
+  {
+    "question": "A customer is nervous that their card details could get stolen, what protects them?",
+    "ground_truth": "Data is protected with TLS 1.3 in transit, AES-256 encryption at rest using AWS KMS, field-level encryption for PII and financial data, and column-level encryption for sensitive database fields. For payments, FinSolve has PCI-DSS Level 1 compliance, regular penetration testing, and isolation of the cardholder data environment.",
+    "gold": [
+      "5.1.2 Data Protection",
+      "5.2.1 Regulatory Compliance"
+    ],
+    "type": "indirect-multi-section"
+  },
+  {
+    "question": "How do we stop old, wrong data from being shown to users after something changes?",
+    "ground_truth": "Cache invalidation uses event-based triggers and time-to-live (TTL) policies.",
+    "gold": [
+      "2.4.3 Caching Strategy"
+    ],
+    "type": "indirect"
+  },
+  {
+    "question": "Our new hire has no idea how to write commit messages the way the team expects, what is the rule?",
+    "ground_truth": "Commit messages are semantic (prefixes like feat, fix, docs, style, refactor, perf, test, chore) and are linked to Jira tickets, for example feat(AUTH-123): add biometric authentication.",
+    "gold": [
+      "4.3.2 Commit Guidelines"
+    ],
+    "type": "indirect"
+  },
+  {
+    "question": "Our cloud bill keeps going up, who checks whether we are running more than we need?",
+    "ground_truth": "Capacity planning includes a quarterly infrastructure review, growth projections and scaling recommendations, and cost optimization analysis.",
+    "gold": [
+      "8.3.2 Capacity Planning"
+    ],
+    "type": "indirect"
+  },
+  {
+    "question": "People are getting woken up at night for small issues, how are alerts supposed to be set up?",
+    "ground_truth": "PagerDuty is used for critical incidents (24/7 response), Slack for non-critical notifications, and email for informational alerts. Thresholds are tuned to avoid alert fatigue, alerts are multi-stage (warning to critical), auto-remediation is used where possible, and there are clear ownership and escalation paths.",
+    "gold": [
+      "8.1.3 Alerting Strategy"
+    ],
+    "type": "indirect"
+  },
+  {
+    "question": "A customer in Europe emailed asking us to erase everything we hold about them, is that something we have to support?",
+    "ground_truth": "FinSolve's compliance frameworks cover this: GDPR includes data subject rights, and the DPDP Act compliance includes the right to access and delete personal data.",
+    "gold": [
+      "5.2.1 Regulatory Compliance"
+    ],
+    "type": "indirect"
+  },
+  {
+    "question": "A test keeps failing randomly and then passes when I run it again, what does the pipeline do about that?",
+    "ground_truth": "The pipeline automatically retries flaky tests, with a maximum of 3 attempts.",
+    "gold": [
+      "6.2.1 CI/CD Integration"
+    ],
+    "type": "indirect"
+  },
+  {
+    "question": "Where can I get realistic data to test with without exposing real customer information?",
+    "ground_truth": "Testing uses anonymized production data for realistic tests, data generators for edge cases and stress testing, and on-demand test environment provisioning.",
+    "gold": [
+      "6.2.2 Test Data Management"
+    ],
+    "type": "indirect"
+  },
+  {
+    "question": "Why can't one container in our cluster just talk to any other container it wants?",
+    "ground_truth": "Kubernetes network policies control pod-to-pod communication. The configuration also sets resource limits and requests for all containers and enforces pod security policies.",
+    "gold": [
+      "7.3.2 Kubernetes Configuration"
+    ],
+    "type": "indirect"
+  },
+  {
+    "question": "When one service keeps timing out, how do we stop it from dragging all the other services down with it?",
+    "ground_truth": "Circuit breakers are implemented using the Istio service mesh to prevent cascading failures, with configurable thresholds for error rates and latency, and fallback mechanisms for degraded service modes.",
+    "gold": [
+      "2.5.2 Circuit Breakers"
+    ],
+    "type": "indirect"
+  }
+]
