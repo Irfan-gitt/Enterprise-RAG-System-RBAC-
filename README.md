@@ -3,7 +3,7 @@
 An internal knowledge assistant for company documents. Employees ask questions in plain language and get answers drawn only from the departments their role is allowed to see.
 
 **Live demo:** https://enterprise-rag-system-rbac.onrender.com/chat
-The demo runs on a free tier, so the first load after a quiet period can take about a minute.
+The demo runs on a free tier, so sometimes the first load after a quiet period can take about a minute.
 
 ---
 
