@@ -24,6 +24,7 @@ from rbac import ROLE_PERMISSIONS
 load_dotenv()
 
 APP_DIR = Path(__file__).parent
+FRONTEND_DIR = APP_DIR / "FRONTEND"
 JWT_SECRET_KEY = os.getenv(
     "JWT_SECRET_KEY", "prototype-only-change-this-secret")
 JWT_ALGORITHM = "HS256"
@@ -128,24 +129,24 @@ def health() -> dict[str, str]:
 
 @app.get("/")
 def login_page() -> FileResponse:
-    return FileResponse(APP_DIR / "login.html")
+    return FileResponse(FRONTEND_DIR / "login.html")
 
 
 @app.get("/chat")
 def chat_page() -> FileResponse:
-    return FileResponse(APP_DIR / "chat.html")
+    return FileResponse(FRONTEND_DIR / "chat.html")
 
 
 @app.get("/style.css")
 def style() -> FileResponse:
-    return FileResponse(APP_DIR / "style.css")
+    return FileResponse(FRONTEND_DIR / "style.css")
 
 
 @app.get("/login.js")
 def login_js() -> FileResponse:
-    return FileResponse(APP_DIR / "login.js")
+    return FileResponse(FRONTEND_DIR / "login.js")
 
 
 @app.get("/chat.js")
 def chat_js() -> FileResponse:
-    return FileResponse(APP_DIR / "chat.js")
+    return FileResponse(FRONTEND_DIR / "chat.js")
