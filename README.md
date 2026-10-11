@@ -20,25 +20,9 @@ The demo runs on a free tier, so sometimes the first load after a quiet period c
 
 ## How it works
 
-```mermaid
-flowchart TD
-    A["Login page"] -->|"email + password"| B["JWT with role"]
-    B --> C["Chat page"]
-    C -->|"question + token"| D["FastAPI /api/chat"]
-    D --> E{"Guard: keywords + topic check"}
-    E -->|"off-topic"| X["Refusal (no retrieval, no answer LLM)"]
-    E -->|"allowed"| F["Rewrite follow-up as standalone question"]
-    F --> G["Jev picks a retrieval strategy"]
-    G --> H1["lookup_search<br/>BM25 on one person's record"]
-    G --> H2["specific_search<br/>hybrid search"]
-    G --> H3["summarize_search<br/>multi-query hybrid search"]
-    H1 --> I["Search only the departments the role may access"]
-    H2 --> I
-    H3 --> I
-    I --> J["Merge + rerank"]
-    J --> K["Finalizing LLM writes the answer from retrieved chunks"]
-    K --> L["Answer"]
-```
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/d46643ea-5399-482a-8a60-0dc462dc2318" width="600" alt="Request flow: login, guardrail, Jev router, role-filtered retrieval, answer">
+</p>
 
 ### Retrieval strategies
 
